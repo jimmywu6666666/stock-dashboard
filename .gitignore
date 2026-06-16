@@ -1,0 +1,6 @@
+data/*.sqlite
+data/*.sqlite-*
+node_modules/
+dist/
+.env
+.env.deploy

@@ -1,0 +1,7 @@
+.git
+.DS_Store
+data
+node_modules
+npm-debug.log
+.env
+daily_stock_analysis

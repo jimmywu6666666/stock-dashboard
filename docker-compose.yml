@@ -1,0 +1,60 @@
+services:
+  stock-dashboard:
+    build: .
+    container_name: stock-dashboard
+    restart: unless-stopped
+    depends_on:
+      - stock-dsa
+    ports:
+      - "127.0.0.1:${APP_PORT:-3000}:3000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      DSA_API_BASE_URL: ${DSA_API_BASE_URL:-http://stock-dsa:8000}
+      DSA_REPORT_LANGUAGE: ${DSA_REPORT_LANGUAGE:-zh}
+      ACCESS_USERNAME: ${ACCESS_USERNAME:-admin}
+      ACCESS_PASSWORD: ${ACCESS_PASSWORD:-change-me}
+      SESSION_SECRET: ${SESSION_SECRET:-please-change-this-session-secret}
+      TENCENT_SECRET_ID: ${TENCENT_SECRET_ID:-}
+      TENCENT_SECRET_KEY: ${TENCENT_SECRET_KEY:-}
+      TENCENT_REGION: ${TENCENT_REGION:-ap-guangzhou}
+      TENCENT_OCR_ACTION: ${TENCENT_OCR_ACTION:-GeneralAccurateOCR}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OCR_API_URL: ${OCR_API_URL:-}
+      OCR_API_KEY: ${OCR_API_KEY:-}
+      ALLOW_SIGNUP: ${ALLOW_SIGNUP:-false}
+      SIGNUP_CODE: ${SIGNUP_CODE:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      DAILY_REPORT_TIME: ${DAILY_REPORT_TIME:-16:30}
+      REPORT_SMTP_HOST: ${REPORT_SMTP_HOST:-}
+      REPORT_SMTP_PORT: ${REPORT_SMTP_PORT:-465}
+      REPORT_SMTP_SECURE: ${REPORT_SMTP_SECURE:-true}
+      REPORT_SMTP_USER: ${REPORT_SMTP_USER:-}
+      REPORT_SMTP_PASS: ${REPORT_SMTP_PASS:-}
+      REPORT_EMAIL_FROM: ${REPORT_EMAIL_FROM:-}
+    volumes:
+      - ./data:/app/data
+
+  stock-dsa:
+    build:
+      context: ./daily_stock_analysis
+      dockerfile: docker/Dockerfile
+    container_name: stock-dsa
+    restart: unless-stopped
+    command: ["python", "main.py", "--serve-only", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - ./.env
+    environment:
+      TZ: Asia/Shanghai
+      WEBUI_HOST: 0.0.0.0
+      API_PORT: 8000
+      REPORT_LANGUAGE: ${DSA_REPORT_LANGUAGE:-zh}
+      DATABASE_PATH: /app/data/stock_analysis.db
+      LOG_DIR: /app/logs
+    volumes:
+      - ./daily_stock_analysis/data:/app/data
+      - ./daily_stock_analysis/logs:/app/logs
+      - ./daily_stock_analysis/reports:/app/reports
+      - ./daily_stock_analysis/strategies:/app/strategies:ro
+    expose:
+      - "8000"

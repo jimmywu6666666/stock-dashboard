@@ -1,0 +1,18 @@
+{
+  "name": "股市信息综合看板",
+  "short_name": "股市看板",
+  "description": "个人股市行情、资讯、自选股和持仓看板",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f7f8",
+  "theme_color": "#0f766e",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
