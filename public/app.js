@@ -2034,7 +2034,7 @@ function reportSettingsTemplate() {
                 <span>${settings.smtpConfigured ? "启用邮箱发送" : "服务端暂未配置 SMTP"}</span>
               </label>
               <input name="email" type="email" placeholder="你的收件邮箱" value="${escapeAttr(settings.email || "")}" />
-              <p class="muted-line">日报会发送到这里填写的邮箱。邮箱发送需要服务端先配置 SMTP 授权码。</p>
+              <p class="muted-line">日报会发送到这里填写的邮箱，保存后可以先发送测试确认。</p>
             </section>
             <div class="report-settings-actions">
               <button type="submit" ${state.loading.has("reportSettings") ? "disabled" : ""}>保存设置</button>
