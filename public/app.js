@@ -310,7 +310,7 @@ async function loadDsaHistory(options = {}) {
 }
 
 function pruneDsaHistorySelection() {
-  const ids = new Set(dsaSavedHistoryItems().map((item) => String(recordIdForDsaHistory(item))).filter(Boolean));
+  const ids = new Set(dsaHistoryItems().map(dsaSelectionIdForHistoryItem).filter(Boolean));
   state.dsaHistorySelection = new Set([...state.dsaHistorySelection].filter((id) => ids.has(String(id))));
 }
 
@@ -631,8 +631,8 @@ function toggleDsaHistorySelection(recordId, checked) {
 
 function toggleAllDsaHistorySelection(checked) {
   if (checked) {
-    for (const item of dsaSavedHistoryItems()) {
-      const id = recordIdForDsaHistory(item);
+    for (const item of dsaHistoryItems()) {
+      const id = dsaSelectionIdForHistoryItem(item);
       if (id) state.dsaHistorySelection.add(String(id));
     }
   } else {
@@ -642,26 +642,38 @@ function toggleAllDsaHistorySelection(checked) {
 }
 
 async function deleteSelectedDsaHistory() {
-  const recordIds = [...state.dsaHistorySelection].map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0);
-  if (!recordIds.length) {
+  const selectedIds = [...state.dsaHistorySelection].map((id) => String(id)).filter(Boolean);
+  const pendingTaskIds = selectedIds.filter((id) => id.startsWith("task:")).map((id) => id.slice(5)).filter(Boolean);
+  const recordIds = selectedIds
+    .filter((id) => !id.startsWith("task:"))
+    .map((id) => Number(id))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  if (!recordIds.length && !pendingTaskIds.length) {
     state.dsaMessage = "请选择要删除的历史记录";
     render();
     return;
   }
-  if (!window.confirm(`确定删除选中的 ${recordIds.length} 条 AI 分析历史吗？`)) return;
+  if (!window.confirm(`确定删除选中的 ${selectedIds.length} 条 AI 分析历史吗？`)) return;
   setLoading("dsaHistoryDelete", true);
   try {
-    await api("/api/dsa/history", {
-      method: "DELETE",
-      body: JSON.stringify({ recordIds, userId: activeViewUserId() })
-    });
-    const selectedWasDeleted = state.dsaSelectedRecordId && recordIds.map(String).includes(String(state.dsaSelectedRecordId));
+    if (recordIds.length) {
+      await api("/api/dsa/history", {
+        method: "DELETE",
+        body: JSON.stringify({ recordIds, userId: activeViewUserId() })
+      });
+    }
+    for (const taskId of pendingTaskIds) removeDsaPendingTask(taskId);
+    const selectedWasDeleted = state.dsaSelectedRecordId && (
+      recordIds.map(String).includes(String(state.dsaSelectedRecordId)) ||
+      pendingTaskIds.map(String).includes(String(state.dsaSelectedRecordId))
+    );
     state.dsaHistorySelection.clear();
     if (selectedWasDeleted) {
+      state.dsaTask = null;
       state.dsaSelectedReport = null;
       state.dsaSelectedRecordId = null;
     }
-    await loadDsaHistory({ silent: true });
+    if (recordIds.length) await loadDsaHistory({ silent: true });
     state.dsaMessage = "";
     render();
   } catch (error) {
@@ -2659,8 +2671,8 @@ function dsaSavedHistoryItems() {
 }
 
 function dsaAllHistorySelected() {
-  const items = dsaSavedHistoryItems();
-  return Boolean(items.length) && items.every((item) => state.dsaHistorySelection.has(String(recordIdForDsaHistory(item))));
+  const ids = dsaHistoryItems().map(dsaSelectionIdForHistoryItem).filter(Boolean);
+  return Boolean(ids.length) && ids.every((id) => state.dsaHistorySelection.has(String(id)));
 }
 
 function dsaHistoryItemTemplate(item) {
@@ -2688,12 +2700,14 @@ function dsaHistoryItemTemplate(item) {
 
 function dsaPendingHistoryItemTemplate(item) {
   const taskId = item.taskId || "";
+  const selectionId = dsaPendingSelectionId(taskId);
   const active = String(taskId) === String(state.dsaSelectedRecordId);
   const status = item.status === "failed" ? "失败" : "分析中";
   const spinning = item.status !== "failed";
+  const checked = state.dsaHistorySelection.has(selectionId);
   return `
     <div class="dsa-history-row pending ${escapeAttr(item.status || "")} ${active ? "active" : ""}">
-      <span class="dsa-history-spacer"></span>
+      <input type="checkbox" ${checked ? "checked" : ""} data-dsa-history-check="${escapeAttr(selectionId)}" aria-label="选择分析任务" />
       <button type="button" class="dsa-history-card" data-dsa-task-id="${escapeAttr(taskId)}">
         <span>
           <strong>${escapeHtml(item.stockName || item.stockCode || "股票")}${spinning ? `<span class="dsa-inline-spinner" aria-hidden="true"></span>` : ""}</strong>
@@ -2704,6 +2718,16 @@ function dsaPendingHistoryItemTemplate(item) {
       </button>
     </div>
   `;
+}
+
+function dsaPendingSelectionId(taskId) {
+  return taskId ? `task:${String(taskId)}` : "";
+}
+
+function dsaSelectionIdForHistoryItem(item) {
+  if (item?.__pending) return dsaPendingSelectionId(item.taskId);
+  const recordId = recordIdForDsaHistory(item);
+  return recordId ? String(recordId) : "";
 }
 
 function recordIdForDsaHistory(item) {
