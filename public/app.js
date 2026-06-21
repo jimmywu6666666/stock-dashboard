@@ -183,7 +183,7 @@ function bootTaskHasDegraded(key) {
     jin10: () => hasError(state.jin10),
     eastmoneyNews: () => hasError(state.eastmoneyNews),
     hotTopics: () => hasError(state.mainlines) || hasError(state.hotStocks),
-    sectors: () => hasError(state.sectorFlowDates) || hasError(state.sectorRankingDates) || hasError(state.sectorFlow) || hasError(state.sectorRanking),
+    sectors: () => hasError(state.sectorRankingDates) || hasError(state.sectorRanking),
     watchlist: () => Boolean(state.message),
     posts: () => hasError(state.posts.guba),
     reportSettings: () => hasError(state.reportSettings),
@@ -1172,6 +1172,13 @@ async function loadSectors(options = {}) {
   ]);
 }
 
+async function loadSectorRankingOnly(options = {}) {
+  await loadEnvelopeWithOptions("sectorRankingDates", "/api/sectors/ranking/dates", options);
+  const rankingDates = state.sectorRankingDates.data?.dates || [];
+  if (state.sectorRankingDate === "latest" && rankingDates[0]) state.sectorRankingDate = rankingDates[0];
+  await loadSectorRanking(options);
+}
+
 function seedSectorFlowSelection() {
   const series = state.sectorFlow.data?.series || [];
   if (state.sectorFlowSelected.size || !series.length) return;
@@ -1327,7 +1334,7 @@ async function refreshAllWithBootProgress(options = {}) {
         loadEnvelope("hotStocks", "/api/hot-stocks?limit=10")
       ]);
     }),
-    runBootTask("sectors", () => loadSectors()),
+    runBootTask("sectors", () => loadSectorRankingOnly()),
     runBootTask("posts", () => state.selectedSymbol ? loadPosts(state.selectedSymbol) : Promise.resolve()),
     runBootTask("reportSettings", () => loadReportSettings()),
     runBootTask("adminUsers", () => loadAdminUsers()),
