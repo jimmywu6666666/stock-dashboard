@@ -3014,7 +3014,6 @@ function dsaQuotaTemplate() {
 
 function dsaSearchResultsTemplate() {
   const results = state.dsaSearch.results?.data || [];
-  const hasQuery = Boolean(String(state.dsaSearch.query || "").trim());
   if (state.dsaSearch.results?.errorMessage) {
     return `<p class="dsa-search-note">${escapeHtml(state.dsaSearch.results.errorMessage)}</p>`;
   }
@@ -3034,7 +3033,7 @@ function dsaSearchResultsTemplate() {
       </div>
     `;
   }
-  return hasQuery && state.dsaSearch.query === state.dsaQuery ? `<p class="dsa-search-note">没有匹配到股票</p>` : "";
+  return "";
 }
 
 function dsaHistoryTemplate() {
