@@ -53,6 +53,7 @@ const state = {
   stockChartPeriod: "daily",
   stockChartSelectedIndex: null,
   activeSearchInput: "",
+  activeSearchInputAt: 0,
   stockSearch: { query: "", results: emptyEnvelope([]) },
   detail: null,
   stockDetail: null,
@@ -975,9 +976,14 @@ async function runStockSearch(queryInput, options = {}) {
   }
 }
 
+function markSearchInput(kind) {
+  state.activeSearchInput = kind;
+  state.activeSearchInputAt = Date.now();
+}
+
 function scheduleStockSearch(event) {
   const query = String(event.target.value || "").trim();
-  state.activeSearchInput = "stock";
+  markSearchInput("stock");
   state.stockSearch.query = query;
   state.stockSearch.results = query ? state.stockSearch.results : emptyEnvelope([]);
   state.message = "";
@@ -1031,7 +1037,7 @@ async function runDsaStockSearch(queryInput, options = {}) {
 
 function scheduleDsaStockSearch(event) {
   const query = String(event.target.value || "").trim();
-  state.activeSearchInput = "dsa";
+  markSearchInput("dsa");
   state.dsaQuery = query;
   state.dsaSearch.query = query;
   state.dsaSearch.results = query ? state.dsaSearch.results : emptyEnvelope([]);
@@ -1719,7 +1725,28 @@ function render() {
 
 function captureFocusedSearchInput() {
   const active = document.activeElement;
-  if (!active?.matches?.("[data-dsa-search-input], [data-stock-search-input]")) return null;
+  if (!active?.matches?.("[data-dsa-search-input], [data-stock-search-input]")) {
+    if (Date.now() - state.activeSearchInputAt > 5000) return null;
+    if (state.activeSearchInput === "dsa") {
+      return {
+        selector: "[data-dsa-search-input]",
+        kind: "dsa",
+        value: state.dsaQuery || state.dsaSearch.query || "",
+        selectionStart: null,
+        selectionEnd: null
+      };
+    }
+    if (state.activeSearchInput === "stock") {
+      return {
+        selector: "[data-stock-search-input]",
+        kind: "stock",
+        value: state.stockSearch.query || "",
+        selectionStart: null,
+        selectionEnd: null
+      };
+    }
+    return null;
+  }
   const value = String(active.value || "");
   const snapshot = {
     selector: active.matches("[data-dsa-search-input]") ? "[data-dsa-search-input]" : "[data-stock-search-input]",
@@ -1746,6 +1773,8 @@ function restoreFocusedSearchInput(snapshot) {
   input.focus();
   if (snapshot.selectionStart != null && snapshot.selectionEnd != null) {
     input.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+  } else {
+    input.setSelectionRange(input.value.length, input.value.length);
   }
 }
 
@@ -1821,7 +1850,7 @@ function bindEvents() {
   const dsaSearchInput = document.querySelector("[data-dsa-search-input]");
   if (dsaSearchInput) {
     dsaSearchInput.addEventListener("focus", () => {
-      state.activeSearchInput = "dsa";
+      markSearchInput("dsa");
     });
     dsaSearchInput.addEventListener("compositionstart", startDsaSearchComposition);
     dsaSearchInput.addEventListener("compositionend", endDsaSearchComposition);
@@ -1851,7 +1880,7 @@ function bindEvents() {
   const stockSearchInput = document.querySelector("[data-stock-search-input]");
   if (stockSearchInput) {
     stockSearchInput.addEventListener("focus", () => {
-      state.activeSearchInput = "stock";
+      markSearchInput("stock");
     });
     stockSearchInput.addEventListener("compositionstart", startStockSearchComposition);
     stockSearchInput.addEventListener("compositionend", endStockSearchComposition);
