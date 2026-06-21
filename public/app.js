@@ -20,8 +20,21 @@ const state = {
   dsaSelectedReport: null,
   dsaSelectedRecordId: null,
   dsaMessage: "",
+  mainlines: emptyEnvelope([]),
+  mainlinesExpanded: false,
   hotStocks: emptyEnvelope([]),
-  hotSectors: emptyEnvelope([]),
+  sectorMode: "overview",
+  sectorFlowDates: emptyEnvelope({ dates: [] }),
+  sectorFlow: emptyEnvelope(null),
+  sectorFlowDate: "latest",
+  sectorFlowSelected: new Set(),
+  sectorFlowPlaying: false,
+  sectorFlowSpeed: 12,
+  sectorFlowCursor: null,
+  sectorRankingDates: emptyEnvelope({ dates: [] }),
+  sectorRanking: emptyEnvelope(null),
+  sectorRankingDate: "latest",
+  sectorRankingSort: { key: "pct_1d", direction: "desc" },
   watchlist: [],
   adminUsers: emptyEnvelope([]),
   reportSettings: emptyEnvelope(null),
@@ -70,7 +83,7 @@ const state = {
   message: ""
 };
 
-const baseTabs = ["行情", "AI分析", "资讯", "热度", "自选股", "使用手册"];
+const baseTabs = ["行情", "AI分析", "资讯", "热度", "板块", "自选股", "使用手册"];
 const app = document.querySelector("#app");
 let stockSearchTimer = null;
 let stockSearchComposing = false;
@@ -78,6 +91,8 @@ let dsaSearchTimer = null;
 let dsaSearchComposing = false;
 let dsaPollTimer = null;
 let dsaPollInFlight = false;
+let sectorReplayTimer = null;
+let sectorReplayToken = 0;
 
 window.addEventListener("scroll", () => {
   if (state.lockedPageScrollTop != null) {
@@ -1026,7 +1041,8 @@ function chooseDsaStock(index) {
 }
 
 async function openSectorDetail(code) {
-  const sector = state.hotSectors.data.find((item) => item.code === code) || { code, name: code };
+  const sector = state.mainlines.data.find((item) => item.code === code)
+    || { code, name: code };
   state.sectorDetail = {
     sector,
     stocks: emptyEnvelope([]),
@@ -1062,6 +1078,151 @@ function findStockForDetail(symbol) {
     || { symbol, name: symbol, market: inferMarket(symbol) };
 }
 
+async function loadSectorDates(options = {}) {
+  await Promise.all([
+    loadEnvelopeWithOptions("sectorFlowDates", "/api/sectors/flow/dates", options),
+    loadEnvelopeWithOptions("sectorRankingDates", "/api/sectors/ranking/dates", options)
+  ]);
+  const flowDates = state.sectorFlowDates.data?.dates || [];
+  const rankingDates = state.sectorRankingDates.data?.dates || [];
+  if (state.sectorFlowDate === "latest" && flowDates[0]) state.sectorFlowDate = flowDates[0];
+  if (state.sectorRankingDate === "latest" && rankingDates[0]) state.sectorRankingDate = rankingDates[0];
+}
+
+async function loadSectorFlow(options = {}) {
+  const date = state.sectorFlowDate || "latest";
+  await loadEnvelopeWithOptions("sectorFlow", `/api/sectors/flow/series?date=${encodeURIComponent(date)}`, options);
+  seedSectorFlowSelection();
+  const data = state.sectorFlow.data;
+  if (data?.last_session_min != null && state.sectorFlowCursor == null) {
+    state.sectorFlowCursor = data.last_session_min;
+  }
+}
+
+async function loadSectorRanking(options = {}) {
+  const date = state.sectorRankingDate || "latest";
+  await loadEnvelopeWithOptions("sectorRanking", `/api/sectors/ranking?date=${encodeURIComponent(date)}`, options);
+}
+
+async function loadSectors(options = {}) {
+  await loadSectorDates(options);
+  await Promise.all([
+    loadSectorFlow(options),
+    loadSectorRanking(options)
+  ]);
+}
+
+function seedSectorFlowSelection() {
+  const series = state.sectorFlow.data?.series || [];
+  if (state.sectorFlowSelected.size || !series.length) return;
+  const featured = series.filter((item) => item.featured).slice(0, 10);
+  const fallback = series.slice(0, 8);
+  state.sectorFlowSelected = new Set((featured.length ? featured : fallback).map((item) => item.code));
+}
+
+function switchSectorMode(mode) {
+  state.sectorMode = ["flow", "ranking"].includes(mode) ? mode : "overview";
+  stopSectorReplay();
+  render();
+}
+
+function changeSectorFlowDate(value) {
+  state.sectorFlowDate = value || "latest";
+  state.sectorFlowCursor = null;
+  stopSectorReplay();
+  loadSectorFlow();
+}
+
+function changeSectorRankingDate(value) {
+  state.sectorRankingDate = value || "latest";
+  loadSectorRanking();
+}
+
+function toggleSectorFlowCode(code, checked) {
+  if (checked) state.sectorFlowSelected.add(code);
+  else state.sectorFlowSelected.delete(code);
+  render();
+}
+
+function selectSectorFlowPreset(preset) {
+  const series = state.sectorFlow.data?.series || [];
+  if (preset === "all") state.sectorFlowSelected = new Set(series.map((item) => item.code));
+  else if (preset === "clear") state.sectorFlowSelected = new Set();
+  else state.sectorFlowSelected = new Set(series.filter((item) => item.featured).slice(0, 12).map((item) => item.code));
+  render();
+}
+
+function toggleSectorReplay() {
+  if (state.sectorFlowPlaying) stopSectorReplay();
+  else startSectorReplay();
+  render();
+}
+
+function startSectorReplay(options = {}) {
+  const data = state.sectorFlow.data;
+  if (!data) return;
+  const max = Math.max(1, data.last_session_min ?? 239);
+  state.sectorFlowPlaying = true;
+  if (options.restart || state.sectorFlowCursor == null || state.sectorFlowCursor >= max) {
+    state.sectorFlowCursor = 1;
+  }
+  clearInterval(sectorReplayTimer);
+  const token = ++sectorReplayToken;
+  sectorReplayTimer = setInterval(() => {
+    if (!state.sectorFlowPlaying || token !== sectorReplayToken) {
+      clearInterval(sectorReplayTimer);
+      return;
+    }
+    state.sectorFlowCursor = Math.min(max, (state.sectorFlowCursor ?? 1) + 1);
+    if (state.sectorFlowCursor >= max) stopSectorReplay();
+    render();
+  }, Math.max(120, 1000 / Math.max(1, Number(state.sectorFlowSpeed) || 12)));
+}
+
+function stopSectorReplay() {
+  state.sectorFlowPlaying = false;
+  sectorReplayToken += 1;
+  clearInterval(sectorReplayTimer);
+  sectorReplayTimer = null;
+}
+
+function changeSectorReplaySpeed(value) {
+  state.sectorFlowSpeed = Math.max(1, Math.min(30, Number(value) || 12));
+  if (state.sectorFlowPlaying) startSectorReplay({ restart: false });
+  else render();
+}
+
+function sortSectorRanking(key) {
+  const current = state.sectorRankingSort;
+  state.sectorRankingSort = {
+    key,
+    direction: current.key === key && current.direction === "desc" ? "asc" : "desc"
+  };
+  render();
+}
+
+function downloadSectorRankingCsv() {
+  const rows = sortedSectorRankingRows();
+  const columns = sectorRankingColumns();
+  const lines = [["排名", "代码", "名称", ...columns.map((column) => column.label)].join(",")];
+  rows.forEach((row, index) => {
+    lines.push([index + 1, row.code, row.name, ...columns.map((column) => row[column.key] == null ? "" : Number(row[column.key]).toFixed(4))]
+      .map(csvCell)
+      .join(","));
+  });
+  const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `sector-ranking-${state.sectorRanking.data?.date || state.sectorRankingDate || "latest"}.csv`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
 async function refreshAll(options = {}) {
   await loadMe();
   await loadDsaConfig();
@@ -1073,8 +1234,9 @@ async function refreshAll(options = {}) {
     loadEnvelope("aShareAnalysis", "/api/market/a-share-analysis"),
     loadEnvelope("jin10", "/api/news/jin10?limit=10"),
     loadEnvelope("eastmoneyNews", "/api/news/eastmoney-hot?limit=10"),
+    loadEnvelope("mainlines", "/api/mainlines?limit=30"),
     loadEnvelope("hotStocks", "/api/hot-stocks?limit=10"),
-    loadEnvelope("hotSectors", "/api/hot-sectors?limit=10"),
+    loadSectors(),
     loadWatchlist(),
     loadReportSettings(),
     loadAdminUsers(),
@@ -1098,6 +1260,7 @@ function isUserReadingOrEditing() {
     || state.stockSearch.results.data.length
     || state.openHoldingId
     || state.activeTab === "AI分析"
+    || state.activeTab === "板块"
     || state.activeTab === "使用手册"
     || state.activeTab === "管理"
     || recentlyScrolled
@@ -1628,12 +1791,38 @@ function bindEvents() {
     const item = state.hotStocks.data[Number(el.dataset.hotIndex)];
     if (item?.symbol) openStockDetail(item.symbol, item);
   }));
-  document.querySelectorAll("[data-sector-stocks]").forEach((el) => el.addEventListener("click", () => openSectorDetail(el.dataset.sectorStocks)));
+  document.querySelectorAll("[data-mainlines-toggle]").forEach((el) => el.addEventListener("click", () => {
+    state.mainlinesExpanded = !state.mainlinesExpanded;
+    render();
+  }));
+  document.querySelectorAll("[data-mainline-sector]").forEach((el) => el.addEventListener("click", () => openSectorDetail(el.dataset.mainlineSector)));
   document.querySelectorAll("[data-sector-stock-open]").forEach((el) => el.addEventListener("click", () => openSectorStock(el.dataset.sectorStockOpen)));
   document.querySelectorAll("[data-close-sector-detail]").forEach((el) => el.addEventListener("click", closeSectorDetail));
   document.querySelectorAll("[data-close-stock-detail]").forEach((el) => el.addEventListener("click", closeStockDetail));
   document.querySelectorAll("[data-chart-period]").forEach((el) => el.addEventListener("click", () => switchStockChartPeriod(el.dataset.chartPeriod)));
   document.querySelectorAll("[data-chart-interactive]").forEach((el) => el.addEventListener("pointerdown", selectChartPoint));
+  document.querySelectorAll("[data-sector-mode]").forEach((el) => el.addEventListener("click", () => switchSectorMode(el.dataset.sectorMode)));
+  document.querySelectorAll("[data-sector-flow-date]").forEach((el) => el.addEventListener("change", () => changeSectorFlowDate(el.value)));
+  document.querySelectorAll("[data-sector-ranking-date]").forEach((el) => el.addEventListener("change", () => changeSectorRankingDate(el.value)));
+  document.querySelectorAll("[data-sector-flow-code]").forEach((el) => el.addEventListener("change", () => toggleSectorFlowCode(el.dataset.sectorFlowCode, el.checked)));
+  document.querySelectorAll("[data-sector-flow-preset]").forEach((el) => el.addEventListener("click", () => selectSectorFlowPreset(el.dataset.sectorFlowPreset)));
+  document.querySelectorAll("[data-sector-replay]").forEach((el) => {
+    el.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      el.textContent = state.sectorFlowPlaying ? "回放" : "暂停";
+      toggleSectorReplay();
+    });
+    el.addEventListener("click", (event) => event.preventDefault());
+    el.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      toggleSectorReplay();
+    });
+  });
+  document.querySelectorAll("[data-sector-speed]").forEach((el) => el.addEventListener("input", () => changeSectorReplaySpeed(el.value)));
+  document.querySelectorAll("[data-sector-sort]").forEach((el) => el.addEventListener("click", () => sortSectorRanking(el.dataset.sectorSort)));
+  document.querySelectorAll("[data-sector-export]").forEach((el) => el.addEventListener("click", downloadSectorRankingCsv));
   document.querySelectorAll("[data-close-detail]").forEach((el) => el.addEventListener("click", closeDetail));
   const stockDetailContent = document.querySelector(".stock-detail-content");
   if (stockDetailContent) {
@@ -1796,6 +1985,7 @@ function unlockBodyScroll(top = state.pageScrollTop || 0) {
 
 function switchTab(tab) {
   if (!tab || state.activeTab === tab) return;
+  if (state.activeTab === "板块") stopSectorReplay();
   state.activeTab = tab;
   state.lockedPageScrollTop = 0;
   state.pageScrollTop = 0;
@@ -1803,6 +1993,7 @@ function switchTab(tab) {
   state.lockedWatchPanelScrollTop = null;
   state.lastUserScrollAt = Date.now();
   render();
+  if (tab === "板块" && (!state.sectorFlow.data || !state.sectorRanking.data) && !state.loading.has("sectorFlow") && !state.loading.has("sectorRanking")) loadSectors();
   state.lockedPageScrollTop = null;
   requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0, behavior: "auto" }));
 }
@@ -1925,14 +2116,22 @@ function dashboardTemplate() {
           <ol class="news-list">${state.eastmoneyNews.data.map(eastmoneyNewsItem).join("") || emptyState("暂未取得资讯热榜")}</ol>
         </section>
 
-        <section class="panel sector-panel mobile-section ${mobileVisible("热度")}">
-          ${sectionTitle("概念板块涨幅榜", state.hotSectors, "hotSectors")}
-          <ol class="sector-list">${state.hotSectors.data.map(hotSectorItem).join("") || emptyState("暂未取得热门板块")}</ol>
-        </section>
+        <div class="heat-row mobile-section ${mobileVisible("热度")}">
+          <section class="panel mainline-panel">
+            ${sectionTitle("主线跟踪", state.mainlines, "mainlines")}
+            ${mainlineListToolbar()}
+            <ol class="mainline-list">${visibleMainlines().map(mainlineItem).join("") || emptyState("暂未取得主线数据")}</ol>
+          </section>
 
-        <section class="panel hot-panel mobile-section ${mobileVisible("热度")}">
-          ${sectionTitle("东财热股", state.hotStocks, "hotStocks")}
-          <ol class="hot-list">${state.hotStocks.data.map(hotStockItem).join("") || emptyState("暂未取得热门股票")}</ol>
+          <section class="panel hot-panel">
+            ${sectionTitle("东财热股", state.hotStocks, "hotStocks")}
+            <ol class="hot-list">${state.hotStocks.data.map(hotStockItem).join("") || emptyState("暂未取得热门股票")}</ol>
+          </section>
+        </div>
+
+        <section class="panel sector-feature-panel mobile-section ${mobileVisible("板块")}">
+          ${sectionTitle("板块", state.sectorMode === "flow" ? state.sectorFlow : state.sectorRanking, state.sectorMode === "flow" ? "sectorFlow" : "sectorRanking")}
+          ${sectorFeatureTemplate()}
         </section>
 
         ${state.user?.isAdmin ? `
@@ -2985,24 +3184,394 @@ function hotStockItem(item, index) {
   `;
 }
 
-function hotSectorItem(item) {
-  const trend = item.changePercent == null ? "flat" : item.changePercent >= 0 ? "up-text" : "down-text";
+function visibleMainlines() {
+  const rows = state.mainlines.data || [];
+  return state.mainlinesExpanded ? rows : rows.slice(0, 12);
+}
+
+function mainlineListToolbar() {
+  const total = state.mainlines.data?.length || 0;
+  if (total <= 12) return "";
+  return `
+    <div class="mainline-list-toolbar">
+      <span>首页显示 ${state.mainlinesExpanded ? total : Math.min(12, total)} / ${total}</span>
+      <button type="button" data-mainlines-toggle>${state.mainlinesExpanded ? "收起" : "展开全部"}</button>
+    </div>
+  `;
+}
+
+function mainlineItem(item) {
+  const trend = item.pct == null ? "flat" : item.pct >= 0 ? "up-text" : "down-text";
+  const flowTrend = item.mainFlow == null ? "flat" : item.mainFlow >= 0 ? "up-text" : "down-text";
+  const breadth = (item.upCount || 0) + (item.downCount || 0);
+  const breadthText = breadth ? `涨 ${formatCount(item.upCount)} / 跌 ${formatCount(item.downCount)}` : "自动主线";
+  const leaderText = item.leadStock
+    ? `领涨 ${escapeHtml(item.leadStock)}${item.leadStockCode ? ` · ${escapeHtml(item.leadStockCode)}` : ""}`
+    : "";
   return `
     <li>
-      <span>${item.rank}</span>
-      <div class="sector-main">
-        <strong>${escapeHtml(item.name)}</strong>
-        ${item.leadStock ? `<small class="sector-leader">领涨 ${escapeHtml(item.leadStock)}${item.leadStockCode ? ` · ${escapeHtml(item.leadStockCode)}` : ""}</small>` : ""}
-      </div>
-      <div class="sector-meta">
-        <div class="sector-stat">
-          <strong class="${trend}">${formatPercent(item.changePercent)}</strong>
-          <small>涨 ${formatCount(item.upCount)} / 跌 ${formatCount(item.downCount)}</small>
+      <span class="mainline-rank">${item.rank}</span>
+      <div class="mainline-content">
+        <div class="mainline-top">
+          <strong>${escapeHtml(item.name)}</strong>
+          <b class="${trend}">${formatPercent(item.pct)}</b>
+          <button type="button" data-mainline-sector="${escapeAttr(item.code)}">相关股票</button>
         </div>
-        <button type="button" data-sector-stocks="${escapeAttr(item.code)}">相关股票</button>
+        ${leaderText ? `<small class="mainline-lead">${leaderText}</small>` : ""}
+        <em class="mainline-foot">
+          <span>${escapeHtml(item.code)} · ${escapeHtml(breadthText)}</span>
+          <span class="${flowTrend}">净流入 ${formatSignedFixed(item.mainFlow, 2)} 亿</span>
+        </em>
       </div>
     </li>
   `;
+}
+
+function sectorFeatureTemplate() {
+  if (state.sectorMode === "overview") return sectorOverviewTemplate();
+  return `
+    <div class="sector-feature">
+      <div class="sector-feature-tabs">
+        <button type="button" data-sector-mode="overview">← 返回</button>
+        <button type="button" class="${state.sectorMode === "flow" ? "active" : ""}" data-sector-mode="flow">板块流向</button>
+        <button type="button" class="${state.sectorMode === "ranking" ? "active" : ""}" data-sector-mode="ranking">板块涨跌幅</button>
+      </div>
+      ${state.sectorMode === "ranking" ? sectorRankingTemplate() : sectorFlowTemplate()}
+    </div>
+  `;
+}
+
+function sectorOverviewTemplate() {
+  const rankingRows = [...(state.sectorRanking.data?.rows || [])].sort((a, b) => (numberOrNull(b.pct_1d) ?? -Infinity) - (numberOrNull(a.pct_1d) ?? -Infinity));
+  const flowRows = (state.sectorFlow.data?.series || [])
+    .map((item) => ({ ...item, latest: numberOrNull((item.data || []).at(state.sectorFlow.data?.last_session_min ?? -1) ?? (item.data || []).at(-1)) }))
+    .filter((item) => item.latest != null)
+    .sort((a, b) => Math.abs(b.latest) - Math.abs(a.latest));
+  return `
+    <div class="sector-overview-grid">
+      <button type="button" class="sector-overview-card ranking" data-sector-mode="ranking">
+        <header>
+          <strong>板块涨跌幅</strong>
+          <em>完整榜单 →</em>
+        </header>
+        ${sectorOverviewRanking(rankingRows)}
+      </button>
+      <button type="button" class="sector-overview-card flow" data-sector-mode="flow">
+        <header>
+          <strong>板块资金流向</strong>
+          <em>资金流向 →</em>
+        </header>
+        ${sectorOverviewFlow(flowRows)}
+      </button>
+    </div>
+  `;
+}
+
+function sectorOverviewRanking(rows) {
+  if (state.loading.has("sectorRanking") && !rows.length) return `<div class="card-loading">加载中...</div>`;
+  if (!rows.length) return emptyState("暂无涨跌幅数据");
+  const gainers = rows.slice(0, 3);
+  const losers = rows.filter((row) => numberOrNull(row.pct_1d) != null).sort((a, b) => (numberOrNull(a.pct_1d) ?? Infinity) - (numberOrNull(b.pct_1d) ?? Infinity)).slice(0, 3);
+  return `
+    <div class="overview-rank-list">
+      ${gainers.map((row, index) => overviewRankRow(row, index, "up")).join("")}
+      <hr />
+      ${losers.map((row, index) => overviewRankRow(row, index, "down")).join("")}
+    </div>
+  `;
+}
+
+function overviewRankRow(row, index, side) {
+  const value = numberOrNull(row.pct_1d);
+  const width = Math.max(12, Math.min(100, Math.abs(value || 0) * 28));
+  return `
+    <span class="${side}">
+      <b>${index + 1}</b>
+      <i>${escapeHtml(row.name)}</i>
+      <em><u style="width:${width}%"></u></em>
+      <strong>${formatPercent(value)}</strong>
+    </span>
+  `;
+}
+
+function sectorOverviewFlow(rows) {
+  if (state.loading.has("sectorFlow") && !rows.length) return `<div class="card-loading">加载中...</div>`;
+  if (!rows.length) return emptyState("暂无资金流数据");
+  const leaders = rows.filter((row) => row.latest > 0).slice(0, 6);
+  return `
+    <div class="overview-flow-chart">${sectorOverviewFlowSvg(rows.slice(0, 12))}</div>
+    <div class="overview-flow-list">
+      ${leaders.map((row) => `
+        <span>
+          <i style="background:${escapeAttr(row.color || "#d94f4f")}"></i>
+          <b>${escapeHtml(row.name)}</b>
+          <strong>${formatSignedFixed(row.latest, 2)}</strong>
+        </span>
+      `).join("")}
+    </div>
+  `;
+}
+
+function sectorOverviewFlowSvg(rows) {
+  const width = 520;
+  const height = 150;
+  const left = 24;
+  const right = 12;
+  const top = 12;
+  const bottom = 24;
+  const values = rows.flatMap((row) => row.data || []).filter((value) => value != null).map(Number);
+  const min = Math.min(0, ...values);
+  const max = Math.max(0, ...values);
+  const xFor = (index) => left + (index / 239) * (width - left - right);
+  const yFor = (value) => top + ((max - value) / Math.max(1, max - min)) * (height - top - bottom);
+  return `
+    <svg viewBox="0 0 ${width} ${height}" aria-hidden="true">
+      <rect x="0" y="0" width="${width}" height="${height}" rx="10" />
+      <line x1="${left}" y1="${yFor(0).toFixed(1)}" x2="${width - right}" y2="${yFor(0).toFixed(1)}" />
+      ${rows.map((row) => `<polyline points="${(row.data || []).map((value, index) => `${xFor(index).toFixed(1)},${yFor(Number(value || 0)).toFixed(1)}`).join(" ")}" stroke="${escapeAttr(row.color || "#d94f4f")}" />`).join("")}
+      <text x="${left}" y="${height - 6}">09:30</text>
+      <text x="${width / 2 - 16}" y="${height - 6}">11:30</text>
+      <text x="${width - 48}" y="${height - 6}">15:00</text>
+    </svg>
+  `;
+}
+
+function sectorFlowTemplate() {
+  const envelope = state.sectorFlow || emptyEnvelope(null);
+  const data = envelope.data;
+  const dates = state.sectorFlowDates.data?.dates || [];
+  return `
+    <div class="sector-toolbar">
+      <label>
+        <span>日期</span>
+        <select data-sector-flow-date>
+          ${(dates.length ? dates : [state.sectorFlowDate || "latest"]).map((date) => `<option value="${escapeAttr(date)}" ${date === state.sectorFlowDate || (!state.sectorFlowDate && date === dates[0]) ? "selected" : ""}>${escapeHtml(date)}</option>`).join("")}
+        </select>
+      </label>
+      <span>${data?.series?.length || 0} 板块${sectorFlowIsRealtime(data) ? " · 实时(60s)" : ""}</span>
+    </div>
+    ${envelope.errorMessage ? `<p class="warning">${escapeHtml(envelope.errorMessage)}</p>` : ""}
+    ${state.loading.has("sectorFlow") && !data ? `<div class="chart-empty">图表加载中...</div>` : ""}
+    ${data ? `
+      <div class="sector-flow-layout">
+        <div>
+          <header class="sector-flow-title">
+            <strong>${escapeHtml(data.trade_date || "")} 收盘</strong>
+            <span>${escapeHtml(data.title || "资金分时流向")}</span>
+          </header>
+          ${sectorFlowSvg(data)}
+          ${sectorReplayControls(data)}
+        </div>
+        ${sectorFlowPicker(data.series || [])}
+      </div>
+    ` : emptyState("暂无板块流向数据")}
+  `;
+}
+
+function sectorFlowIsRealtime(data) {
+  const latest = state.sectorFlowDates.data?.dates?.[0];
+  return Boolean(data?.trade_date && latest && data.trade_date === latest);
+}
+
+function sectorFlowSvg(data) {
+  const series = (data.series || []).filter((item) => state.sectorFlowSelected.has(item.code));
+  const cursor = Math.max(1, Math.min(data.session_minutes || 240, state.sectorFlowCursor ?? data.last_session_min ?? 239));
+  const visibleSeries = series.map((item) => ({ ...item, data: (item.data || []).slice(0, cursor + 1) }));
+  const width = 920;
+  const height = 420;
+  const left = 62;
+  const right = 130;
+  const top = 28;
+  const bottom = 42;
+  const chartWidth = width - left - right;
+  const chartHeight = height - top - bottom;
+  const values = visibleSeries.flatMap((item) => item.data).filter((value) => value != null && Number.isFinite(Number(value))).map(Number);
+  const minRaw = Math.min(0, ...values);
+  const maxRaw = Math.max(0, ...values);
+  const pad = Math.max((maxRaw - minRaw) * 0.08, 1);
+  const minValue = minRaw - pad;
+  const maxValue = maxRaw + pad;
+  const xFor = (index) => left + (index / Math.max(1, (data.session_minutes || 240) - 1)) * chartWidth;
+  const yFor = (value) => top + ((maxValue - value) / Math.max(1, maxValue - minValue)) * chartHeight;
+  const gridValues = uniqueNumbers([Math.round(maxValue), Math.round((maxValue + minValue) / 2), Math.round(minValue)]);
+  const paths = visibleSeries.map((item) => {
+    const points = item.data.map((value, index) => `${xFor(index).toFixed(1)},${yFor(Number(value)).toFixed(1)}`).join(" ");
+    const lastValue = item.data.at(-1);
+    const lastX = xFor(Math.max(0, item.data.length - 1));
+    const lastY = yFor(Number(lastValue || 0));
+    return `
+      <polyline class="sector-flow-line" points="${points}" stroke="${escapeAttr(item.color || "#d94f4f")}" />
+      <text class="sector-flow-label" x="${(lastX + 8).toFixed(1)}" y="${(lastY + 4).toFixed(1)}">${escapeHtml(item.name)} ${formatSignedFixed(lastValue, 2)}</text>
+    `;
+  }).join("");
+  return `
+    <svg class="sector-flow-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="板块资金流向">
+      <rect class="chart-bg" x="0" y="0" width="${width}" height="${height}" />
+      <text class="chart-axis" x="12" y="20">亿元</text>
+      ${gridValues.map((value) => {
+        const y = yFor(value);
+        return `<line class="chart-grid" x1="${left}" y1="${y.toFixed(1)}" x2="${width - right}" y2="${y.toFixed(1)}" /><text class="chart-axis" x="10" y="${(y + 4).toFixed(1)}">${formatSignedFixed(value, 0)}</text>`;
+      }).join("")}
+      ${(data.ticks || []).map((tick) => `<text class="chart-x-label" x="${xFor(tick.value).toFixed(1)}" y="${height - 12}">${escapeHtml(tick.label)}</text>`).join("")}
+      <line class="chart-grid zero" x1="${left}" y1="${yFor(0).toFixed(1)}" x2="${width - right}" y2="${yFor(0).toFixed(1)}" />
+      ${paths || `<text class="chart-axis" x="${left + 20}" y="${top + 40}">请选择右侧板块</text>`}
+    </svg>
+  `;
+}
+
+function sectorFlowPicker(series) {
+  return `
+    <aside class="sector-flow-picker">
+      <div>
+        <button type="button" data-sector-flow-preset="all">全选</button>
+        <button type="button" data-sector-flow-preset="featured">精选</button>
+        <button type="button" data-sector-flow-preset="clear">清空</button>
+      </div>
+      <div class="sector-flow-checks">
+        ${series.map((item) => `
+          <label>
+            <input type="checkbox" data-sector-flow-code="${escapeAttr(item.code)}" ${state.sectorFlowSelected.has(item.code) ? "checked" : ""} />
+            <i style="background:${escapeAttr(item.color || "#999")}"></i>
+            <span>${escapeHtml(item.name)}</span>
+          </label>
+        `).join("")}
+      </div>
+    </aside>
+  `;
+}
+
+function sectorReplayControls(data) {
+  const cursor = state.sectorFlowCursor ?? data.last_session_min ?? 239;
+  return `
+    <div class="sector-replay">
+      <button type="button" data-sector-replay>${state.sectorFlowPlaying ? "暂停" : "回放"}</button>
+      <label>
+        <span>速度</span>
+        <input type="range" min="1" max="30" step="1" value="${escapeAttr(state.sectorFlowSpeed)}" data-sector-speed />
+      </label>
+      <strong>${escapeHtml(state.sectorFlowSpeed)}×</strong>
+      <span>${cursor + 1}/${data.session_minutes || 240}</span>
+    </div>
+  `;
+}
+
+function sectorRankingTemplate() {
+  const envelope = state.sectorRanking || emptyEnvelope(null);
+  const data = envelope.data;
+  const dates = state.sectorRankingDates.data?.dates || [];
+  const rows = sortedSectorRankingRows();
+  return `
+    <div class="sector-toolbar">
+      <label>
+        <span>日期</span>
+        <select data-sector-ranking-date>
+          ${(dates.length ? dates : [state.sectorRankingDate || "latest"]).map((date) => `<option value="${escapeAttr(date)}" ${date === state.sectorRankingDate || (!state.sectorRankingDate && date === dates[0]) ? "selected" : ""}>${escapeHtml(date)}</option>`).join("")}
+        </select>
+      </label>
+      <button type="button" data-sector-export ${rows.length ? "" : "disabled"}>导出 CSV</button>
+      <span>${data?.date || ""}${data?.updated_at ? ` · ${escapeHtml(data.updated_at)}` : ""}</span>
+    </div>
+    ${envelope.errorMessage ? `<p class="warning">${escapeHtml(envelope.errorMessage)}</p>` : ""}
+    ${state.loading.has("sectorRanking") && !data ? `<div class="chart-empty">表格加载中...</div>` : ""}
+    ${rows.length ? sectorRankingTable(rows) : emptyState("暂无板块涨跌幅数据")}
+  `;
+}
+
+function sectorRankingColumns() {
+  return [
+    { key: "pct_1d", label: "今日" },
+    { key: "pct_5d", label: "5 日" },
+    { key: "pct_10d", label: "10 日" },
+    { key: "pct_20d", label: "20 日" },
+    { key: "pct_60d", label: "60 日" },
+    { key: "pct_120d", label: "120 日" },
+    { key: "vs_ma5_pct", label: "vs MA5" },
+    { key: "vs_ma10_pct", label: "vs MA10" },
+    { key: "vs_ma20_pct", label: "vs MA20" },
+    { key: "sharpe", label: "Sharpe", plain: true }
+  ];
+}
+
+function sortedSectorRankingRows() {
+  const rows = [...(state.sectorRanking.data?.rows || [])];
+  const { key, direction } = state.sectorRankingSort;
+  const sign = direction === "asc" ? 1 : -1;
+  return rows.sort((a, b) => {
+    const av = numberOrNull(a[key]);
+    const bv = numberOrNull(b[key]);
+    if (av == null && bv == null) return String(a.name).localeCompare(String(b.name), "zh-Hans-CN");
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return (av - bv) * sign;
+  });
+}
+
+function sectorRankingTable(rows) {
+  const columns = sectorRankingColumns();
+  return `
+    <div class="sector-ranking-scroll">
+      <table class="sector-ranking-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>名称</th>
+            ${columns.map((column) => `<th><button type="button" data-sector-sort="${escapeAttr(column.key)}">${escapeHtml(column.label)}${state.sectorRankingSort.key === column.key ? (state.sectorRankingSort.direction === "desc" ? " ↓" : " ↑") : ""}</button></th>`).join("")}
+            <th>30日走势</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((row, index) => `
+            <tr>
+              <td>${index + 1}</td>
+              <td><strong>${escapeHtml(row.name)}</strong><small>${escapeHtml(row.code)}</small></td>
+              ${columns.map((column) => sectorRankingCell(row[column.key], column)).join("")}
+              <td>${sectorSparkline(row.trend_30d, row.pct_1d)}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function sectorRankingCell(value, column) {
+  const num = numberOrNull(value);
+  const cls = trendClass(num);
+  const intensity = column.plain || num == null ? 0 : Math.min(0.78, 0.08 + Math.abs(num) / 120);
+  const bg = num == null || column.plain ? "" : ` style="--heat:${intensity.toFixed(2)}"`;
+  const text = column.plain ? formatFixed(num, 2) : formatPercent(num);
+  return `<td class="sector-heat ${cls}"${bg}>${escapeHtml(text)}</td>`;
+}
+
+function sectorSparkline(values) {
+  const rows = (values || []).map(Number).filter(Number.isFinite);
+  if (rows.length < 2) return "";
+  const width = 112;
+  const height = 36;
+  const padX = 5;
+  const padY = 5;
+  const min = Math.min(...rows);
+  const max = Math.max(...rows);
+  const range = Math.max(max - min, Math.abs(max) * 0.005, 0.01);
+  const xFor = (index) => (index / Math.max(1, rows.length - 1)) * (width - padX * 2) + padX;
+  const yFor = (value) => padY + ((max - value) / range) * (height - padY * 2);
+  const linePath = rows.map((value, index) => `${index === 0 ? "M" : "L"}${xFor(index).toFixed(1)},${yFor(value).toFixed(1)}`).join(" ");
+  const cls = rows.at(-1) >= rows[0] ? "up-text" : "down-text";
+  const endX = xFor(rows.length - 1).toFixed(1);
+  const endY = yFor(rows.at(-1)).toFixed(1);
+  return `<svg class="sector-sparkline ${cls}" viewBox="0 0 ${width} ${height}" aria-hidden="true" preserveAspectRatio="none"><line class="spark-guide" x1="${padX}" y1="${height - padY}" x2="${width - padX}" y2="${height - padY}" /><path class="spark-line" d="${linePath}" /><circle cx="${endX}" cy="${endY}" r="2.5" /></svg>`;
+}
+
+function formatSignedFixed(value, digits = 2) {
+  const num = numberOrNull(value);
+  if (num == null) return "--";
+  const sign = num > 0 ? "+" : "";
+  return `${sign}${num.toFixed(digits)}`;
+}
+
+function formatFixed(value, digits = 2) {
+  const num = numberOrNull(value);
+  return num == null ? "--" : num.toFixed(digits);
 }
 
 function adminPanelTemplate() {
@@ -3049,7 +3618,7 @@ function userManualTemplate() {
       </section>
       <section>
         <h3>热度</h3>
-        <p>“热度”页展示概念板块涨幅榜和东财热股。概念板块可点“相关股票”查看板块内股票，东财热股和相关股票都可以继续打开个股详情。</p>
+        <p>“热度”页展示主线跟踪和东财热股。点击主线可查看对应概念板块内股票，东财热股和相关股票都可以继续打开个股详情。</p>
       </section>
       <section>
         <h3>个股查询</h3>
@@ -3921,10 +4490,20 @@ setInterval(() => {
 
 setInterval(() => {
   runAutoRefresh(() => {
+    loadEnvelopeWithOptions("mainlines", "/api/mainlines?limit=30", { silent: true });
     loadEnvelopeWithOptions("hotStocks", "/api/hot-stocks?limit=10", { silent: true });
-    loadEnvelopeWithOptions("hotSectors", "/api/hot-sectors?limit=10", { silent: true });
   });
 }, 180_000);
+
+setInterval(() => {
+  if (!state.authed || state.activeTab !== "板块" || state.sectorFlowPlaying) return;
+  loadSectorFlow({ silent: true });
+}, 60_000);
+
+setInterval(() => {
+  if (!state.authed || state.activeTab !== "板块") return;
+  loadSectorRanking({ silent: true });
+}, 600_000);
 
 function registerServiceWorker() {
   if (!("serviceWorker" in navigator)) return;

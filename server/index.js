@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import https from "node:https";
 import tls from "node:tls";
 import { readFile, mkdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -35,6 +36,27 @@ const SMTP_USER = clean(process.env.REPORT_SMTP_USER || process.env.SMTP_USER ||
 const SMTP_PASS = String(process.env.REPORT_SMTP_PASS || process.env.SMTP_PASS || process.env.EMAIL_PASSWORD || "");
 const SMTP_FROM = clean(process.env.REPORT_EMAIL_FROM || SMTP_USER || "");
 const execFileAsync = promisify(execFile);
+const SECTOR_CATALOG_LIMIT = Number(process.env.SECTOR_CATALOG_LIMIT || 120);
+const SECTOR_FLOW_LIMIT = Number(process.env.SECTOR_FLOW_LIMIT || 32);
+const SECTOR_FEATURED_NAMES = [
+  "光模块", "光通信", "CPO", "光纤", "PCB", "先进封装", "半导体", "AI芯片", "算力",
+  "液冷", "人工智能", "机器人", "消费电子", "存储芯片", "通信服务", "商业航天",
+  "高速连接", "铜缆", "玻璃基板", "固态电池", "创新药", "白酒"
+];
+const SECTOR_FEATURED_SEARCH_NAMES = [
+  "商业航天", "卫星互联网", "光模块", "光通信模块", "CPO概念", "PCB", "先进封装",
+  "半导体", "AI芯片", "算力概念", "液冷概念", "人形机器人", "消费电子概念",
+  "存储芯片", "铜缆高速连接", "高速连接器", "玻璃基板", "固态电池", "创新药"
+];
+const SECTOR_PINNED_ROWS = [
+  { code: "BK1136", name: "光通信模块" },
+  { code: "BK1128", name: "CPO概念" },
+  { code: "BK1036", name: "半导体" },
+  { code: "BK1101", name: "先进封装" },
+  { code: "BK1339", name: "被动元件" },
+  { code: "BK1184", name: "人形机器人" }
+];
+const SIGNANA_BASE_URL = cleanBaseUrl(process.env.SIGNANA_BASE_URL || "https://www.signana.com");
 
 function cleanBaseUrl(value) {
   return String(value || "").trim().replace(/\/+$/, "");
@@ -107,6 +129,36 @@ db.exec(`
     FOREIGN KEY(userId) REFERENCES users(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS sector_catalog (
+    code TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'concept',
+    updatedAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS sector_daily_bars (
+    code TEXT NOT NULL,
+    tradeDate TEXT NOT NULL,
+    open REAL,
+    close REAL,
+    high REAL,
+    low REAL,
+    volume REAL,
+    amount REAL,
+    updatedAt TEXT NOT NULL,
+    PRIMARY KEY(code, tradeDate)
+  );
+
+  CREATE TABLE IF NOT EXISTS sector_flow_minutes (
+    code TEXT NOT NULL,
+    tradeDate TEXT NOT NULL,
+    minuteIndex INTEGER NOT NULL,
+    time TEXT NOT NULL,
+    mainFlow REAL,
+    updatedAt TEXT NOT NULL,
+    PRIMARY KEY(code, tradeDate, minuteIndex)
+  );
+
 `);
 
 ensureUserDisplayNameColumn();
@@ -118,6 +170,7 @@ ensureDefaultUser();
 
 const cache = new Map();
 const staleCache = new Map();
+let sectorHistoryDisabledUntil = 0;
 
 function nowIso() {
   return new Date().toISOString();
@@ -478,7 +531,11 @@ function fallbackFor(key) {
   if (key.startsWith("stock-tags")) return [];
   if (key === "hot-stocks") return [];
   if (key === "hot-sectors") return [];
+  if (key.startsWith("mainlines")) return [];
   if (key.startsWith("sector-stocks")) return [];
+  if (key.startsWith("sector-flow")) return null;
+  if (key.startsWith("sector-ranking")) return null;
+  if (key.startsWith("sector-dates")) return { dates: [] };
   if (key.startsWith("announcements")) return [];
   return [];
 }
@@ -516,7 +573,7 @@ async function fetchJson(url, options = {}) {
     return res.json();
   } catch (error) {
     if (!options.allowCurlFallback) throw error;
-    const textValue = await fetchWithCurl(url, options);
+    const textValue = await fetchWithCurl(url, options).catch(() => fetchWithNodeHttps(url, options));
     return JSON.parse(textValue);
   }
 }
@@ -535,8 +592,35 @@ async function fetchText(url, options = {}) {
     return res.text();
   } catch (error) {
     if (!options.allowCurlFallback) throw error;
-    return fetchWithCurl(url, options);
+    return fetchWithCurl(url, options).catch(() => fetchWithNodeHttps(url, options));
   }
+}
+
+async function fetchWithNodeHttps(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const req = https.request(target, {
+      method: options.method || "GET",
+      timeout: options.timeout || 8000,
+      headers: {
+        "user-agent": "Mozilla/5.0 personal-market-dashboard",
+        "accept": "application/json,text/plain,*/*",
+        ...options.headers
+      }
+    }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { body += chunk; });
+      res.on("end", () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) resolve(body);
+        else reject(new Error(`${res.statusCode} ${res.statusMessage || ""}`.trim()));
+      });
+    });
+    req.on("timeout", () => req.destroy(new Error("请求超时")));
+    req.on("error", reject);
+    if (options.body) req.write(options.body);
+    req.end();
+  });
 }
 
 async function fetchWithCurl(url, options = {}) {
@@ -800,7 +884,7 @@ async function loadIndexTurnoverPair(secid) {
 }
 
 async function fetchEastmoneyHistoryJson(pathValue) {
-  const hosts = ["28.push2his.eastmoney.com", "53.push2his.eastmoney.com", "push2his.eastmoney.com"];
+  const hosts = ["push2delay.eastmoney.com", "28.push2his.eastmoney.com", "53.push2his.eastmoney.com", "push2his.eastmoney.com"];
   let lastError = null;
   for (const host of hosts) {
     try {
@@ -1464,6 +1548,57 @@ async function loadEastmoneyHotSectors(limit) {
   }));
 }
 
+async function loadEastmoneyMainlines(limit = 30) {
+  const pageSize = Math.max(30, Math.min(80, Number(limit) * 2 || 60));
+  const url = `https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=${pageSize}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=f12,f14,f2,f3,f4,f62,f104,f105,f128,f140`;
+  const raw = await fetchJson(url, {
+    allowCurlFallback: true,
+    headers: { referer: "https://quote.eastmoney.com/" }
+  });
+  const list = raw?.data?.diff || [];
+  if (!Array.isArray(list) || !list.length) throw new Error("主线数据为空");
+  const candidates = list
+    .map((item) => ({
+      code: clean(item.f12 || "").toUpperCase(),
+      name: clean(item.f14 || item.f12 || ""),
+      pct: numberOrNull(item.f3),
+      change: numberOrNull(item.f4),
+      mainFlow: numberOrNull(item.f62) == null ? null : numberOrNull(item.f62) / 100000000,
+      upCount: numberOrNull(item.f104),
+      downCount: numberOrNull(item.f105),
+      leadStock: clean(item.f128 || ""),
+      leadStockCode: clean(item.f140 || "")
+    }))
+    .filter((item) => /^BK\d{4}$/.test(item.code) && item.name);
+  if (!candidates.length) throw new Error("主线数据为空");
+  const flowValues = candidates.map((item) => item.mainFlow).filter((value) => value != null);
+  const minFlow = Math.min(0, ...flowValues);
+  const maxFlow = Math.max(0, ...flowValues);
+  const flowRange = Math.max(1, maxFlow - minFlow);
+  const scoreRows = candidates.map((item) => {
+    const pctNorm = clampNumber(((numberOrNull(item.pct) ?? 0) + 5) / 15, 0, 1);
+    const flowNorm = item.mainFlow == null ? 0.35 : clampNumber((item.mainFlow - minFlow) / flowRange, 0, 1);
+    const total = (item.upCount || 0) + (item.downCount || 0);
+    const breadthNorm = total > 0 ? clampNumber((item.upCount || 0) / total, 0, 1) : 0.5;
+    const score = pctNorm * 45 + flowNorm * 35 + breadthNorm * 20;
+    return {
+      ...item,
+      score: Number(score.toFixed(2)),
+      source: "东方财富概念主线"
+    };
+  });
+  return scoreRows
+    .sort((a, b) => b.score - a.score || (numberOrNull(b.pct) ?? -Infinity) - (numberOrNull(a.pct) ?? -Infinity))
+    .slice(0, limit)
+    .map((item, index) => ({ ...item, rank: index + 1 }));
+}
+
+function clampNumber(value, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return min;
+  return Math.max(min, Math.min(max, number));
+}
+
 async function loadEastmoneySectorStocks(code, limit) {
   const sectorCode = clean(code).toUpperCase();
   if (!/^BK\d{4}$/.test(sectorCode)) throw new Error("板块代码不正确");
@@ -1486,6 +1621,497 @@ async function loadEastmoneySectorStocks(code, limit) {
     amount: numberOrNull(item.f6),
     source: "东财板块成分股"
   }));
+}
+
+async function loadSectorCatalog() {
+  const cachedRows = db.prepare("SELECT code, name, category, updatedAt FROM sector_catalog ORDER BY code").all();
+  const latest = cachedRows.reduce((max, row) => Math.max(max, Date.parse(row.updatedAt) || 0), 0);
+  if (cachedRows.length >= 20 && Date.now() - latest < 24 * 60 * 60 * 1000) {
+    return orderSectorCatalog(await mergeFeaturedSectors(cachedRows));
+  }
+  try {
+    const pageSize = Math.max(30, Math.min(500, SECTOR_CATALOG_LIMIT));
+    const url = `https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=${pageSize}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=f12,f14`;
+    const raw = JSON.parse(await fetchWithNodeHttps(url, {
+      timeout: 8000,
+      headers: { referer: "https://quote.eastmoney.com/" }
+    }));
+    const rows = uniqueBy([
+      ...SECTOR_PINNED_ROWS.map((item) => ({ ...item, category: "concept", updatedAt: nowIso() })),
+      ...(raw?.data?.diff || [])
+      .map((item) => ({
+        code: clean(item.f12 || "").toUpperCase(),
+        name: clean(item.f14 || item.f12 || ""),
+        category: "concept",
+        updatedAt: nowIso()
+      }))
+    ], (item) => item.code).filter((item) => /^BK\d{4}$/.test(item.code) && item.name);
+    if (!rows.length) throw new Error("板块目录为空");
+    const stmt = db.prepare("INSERT OR REPLACE INTO sector_catalog (code, name, category, updatedAt) VALUES (?, ?, ?, ?)");
+    for (const row of rows) stmt.run(row.code, row.name, row.category, row.updatedAt);
+    return orderSectorCatalog(await mergeFeaturedSectors(rows));
+  } catch (error) {
+    if (cachedRows.length) return orderSectorCatalog(await mergeFeaturedSectors(cachedRows));
+    throw error;
+  }
+}
+
+async function mergeFeaturedSectors(rows) {
+  const baseRows = uniqueBy([
+    ...SECTOR_PINNED_ROWS.map((item) => ({ ...item, category: "concept", updatedAt: nowIso() })),
+    ...(rows || [])
+  ], (item) => item.code);
+  const resolvedRows = await resolveFeaturedSectorRows(baseRows).catch(() => []);
+  return uniqueBy([...resolvedRows, ...baseRows], (item) => item.code);
+}
+
+async function resolveFeaturedSectorRows(existingRows) {
+  const existing = new Map((existingRows || []).map((row) => [clean(row.name), row]));
+  const resolved = [];
+  for (const name of SECTOR_FEATURED_SEARCH_NAMES) {
+    const direct = existing.get(name) || (existingRows || []).find((row) => clean(row.name).includes(name) || name.includes(clean(row.name)));
+    if (direct) {
+      resolved.push({ ...direct, featured: 1 });
+      continue;
+    }
+    const row = await searchEastmoneySector(name).catch(() => null);
+    if (!row) continue;
+    resolved.push(row);
+    db.prepare("INSERT OR REPLACE INTO sector_catalog (code, name, category, updatedAt) VALUES (?, ?, ?, ?)")
+      .run(row.code, row.name, row.category, row.updatedAt);
+  }
+  return resolved;
+}
+
+async function searchEastmoneySector(queryInput) {
+  const query = clean(queryInput);
+  if (!query) return null;
+  const url = `https://searchapi.eastmoney.com/api/suggest/get?input=${encodeURIComponent(query)}&type=14&token=44c9d251add88e27b65ed86506f6e5da`;
+  const raw = await fetchJson(url, {
+    allowCurlFallback: true,
+    headers: { referer: "https://www.eastmoney.com/" }
+  });
+  const rows = raw?.QuotationCodeTable?.Data || [];
+  const match = (Array.isArray(rows) ? rows : []).find((row) => /^BK\d{4}$/i.test(clean(row.Code || row.UnifiedCode || "")));
+  if (!match) return null;
+  return {
+    code: clean(match.Code || match.UnifiedCode || "").toUpperCase(),
+    name: clean(match.Name || query),
+    category: "concept",
+    featured: 1,
+    updatedAt: nowIso()
+  };
+}
+
+function orderSectorCatalog(rows) {
+  return [...rows].sort((a, b) => sectorFeaturedScore(a) - sectorFeaturedScore(b) || a.name.localeCompare(b.name, "zh-Hans-CN"));
+}
+
+function sectorFeaturedScore(row) {
+  if (Number(row?.featured || 0) > 0) return 0;
+  const name = clean(row?.name);
+  const searchIndex = SECTOR_FEATURED_SEARCH_NAMES.findIndex((word) => sectorNameMatches(name, word));
+  if (searchIndex >= 0) return searchIndex;
+  const keywordIndex = SECTOR_FEATURED_NAMES.findIndex((word) => sectorNameMatches(name, word));
+  return keywordIndex < 0 ? 1000 : SECTOR_FEATURED_SEARCH_NAMES.length + keywordIndex;
+}
+
+function sectorNameMatches(nameInput, keywordInput) {
+  const name = clean(nameInput).toUpperCase();
+  const keyword = clean(keywordInput).toUpperCase();
+  if (!name || !keyword) return false;
+  return name.includes(keyword) || keyword.includes(name);
+}
+
+function sectorFlowUniverse(catalog) {
+  const featured = catalog.filter((row) => sectorFeaturedScore(row) < 1000);
+  const rows = uniqueBy([...featured, ...catalog], (row) => row.code);
+  return rows.slice(0, Math.max(8, Math.min(80, SECTOR_FLOW_LIMIT)));
+}
+
+async function loadSectorDailyBars(codeInput, days = 180) {
+  const code = clean(codeInput).toUpperCase();
+  if (!/^BK\d{4}$/.test(code)) throw new Error("板块代码不正确");
+  const cachedRows = db.prepare("SELECT * FROM sector_daily_bars WHERE code = ? ORDER BY tradeDate").all(code);
+  const latest = cachedRows.at(-1);
+  if (latest && Date.now() - (Date.parse(latest.updatedAt) || 0) < 10 * 60 * 1000 && cachedRows.length >= Math.min(days, 60)) {
+    return cachedRows.slice(-days);
+  }
+  const end = chinaDateKey().replaceAll("-", "");
+  const beginDate = new Date(Date.now() - Math.max(days + 40, 220) * 24 * 60 * 60 * 1000);
+  const begin = chinaDateKey(beginDate).replaceAll("-", "");
+  try {
+    const raw = await fetchSectorHistoryJson(`/api/qt/stock/kline/get?secid=90.${code}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58&klt=101&fqt=1&beg=${begin}&end=${end}`);
+    const rows = (raw?.data?.klines || []).map((line) => parseSectorDailyBar(code, line)).filter(Boolean);
+    if (!rows.length) throw new Error(`${code} 板块日 K 为空`);
+    const stmt = db.prepare(`
+      INSERT OR REPLACE INTO sector_daily_bars (code, tradeDate, open, close, high, low, volume, amount, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const row of rows) stmt.run(row.code, row.tradeDate, row.open, row.close, row.high, row.low, row.volume, row.amount, nowIso());
+    return rows.slice(-days);
+  } catch (error) {
+    if (cachedRows.length) return cachedRows.slice(-days);
+    throw error;
+  }
+}
+
+async function fetchSectorHistoryJson(pathValue) {
+  const hosts = ["push2delay.eastmoney.com", "push2his.eastmoney.com"];
+  let lastError = null;
+  for (const host of hosts) {
+    try {
+      const textValue = await fetchWithNodeHttps(`https://${host}${pathValue}`, {
+        timeout: 8000,
+        headers: { referer: "https://quote.eastmoney.com/" }
+      });
+      const raw = JSON.parse(textValue);
+      if (raw?.data?.klines?.length) return raw;
+      lastError = new Error(`${host} 板块历史行情为空`);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("板块历史行情不可用");
+}
+
+function parseSectorDailyBar(code, line) {
+  const parts = String(line || "").split(",");
+  if (parts.length < 7) return null;
+  return {
+    code,
+    tradeDate: parts[0],
+    open: numberOrNull(parts[1]),
+    close: numberOrNull(parts[2]),
+    high: numberOrNull(parts[3]),
+    low: numberOrNull(parts[4]),
+    volume: numberOrNull(parts[5]),
+    amount: numberOrNull(parts[6])
+  };
+}
+
+async function loadSectorRankingDates() {
+  try {
+    const rows = await loadSectorDailyBars("BK1136", 60);
+    return rows.map((row) => row.tradeDate).filter(Boolean).reverse().slice(0, 30);
+  } catch (error) {
+    sectorHistoryDisabledUntil = Date.now() + 10 * 60 * 1000;
+    console.warn("sector daily history unavailable, falling back to complete ranking source:", readableError(error));
+    return loadSignanaSectorRankingDates().catch(async () => [await loadLatestSectorFlowDate().catch(() => chinaDateKey())]);
+  }
+}
+
+async function loadSectorRanking(dateInput = "latest") {
+  const dates = await loadSectorRankingDates();
+  const targetDate = normalizeSectorDate(dateInput, dates);
+  if (Date.now() < sectorHistoryDisabledUntil) {
+    return loadSignanaSectorRanking(targetDate).catch(() => loadSectorRealtimeRanking(targetDate));
+  }
+  const catalog = await loadSectorCatalog();
+  const selectedCatalog = catalog.slice(0, Math.max(20, Math.min(SECTOR_CATALOG_LIMIT, 160)));
+  const rows = await mapWithConcurrency(selectedCatalog, 8, async (sector) => {
+    const bars = await loadSectorDailyBars(sector.code, 180);
+    return buildSectorRankingRow(sector, bars, targetDate);
+  });
+  const validRows = rows.filter(Boolean);
+  if (!validRows.length) return loadSignanaSectorRanking(targetDate).catch(() => loadSectorRealtimeRanking(targetDate));
+  return {
+    date: targetDate,
+    updated_at: chinaTimeLabel(),
+    rows: validRows.sort((a, b) => (numberOrNull(b.pct_1d) ?? -Infinity) - (numberOrNull(a.pct_1d) ?? -Infinity))
+  };
+}
+
+async function loadSignanaSectorRankingDates() {
+  const raw = JSON.parse(await fetchWithNodeHttps(`${SIGNANA_BASE_URL}/api/sector-ranking/dates`, {
+    timeout: 8000,
+    headers: { referer: `${SIGNANA_BASE_URL}/sector-ranking` }
+  }));
+  const dates = Array.isArray(raw?.dates) ? raw.dates : [];
+  if (!dates.length) throw new Error("完整板块涨跌幅日期为空");
+  return dates.map(clean).filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date)).slice(0, 30);
+}
+
+async function loadSignanaSectorRanking(dateInput = "latest") {
+  const date = clean(dateInput || "latest");
+  const raw = JSON.parse(await fetchWithNodeHttps(`${SIGNANA_BASE_URL}/api/sector-ranking?date=${encodeURIComponent(date || "latest")}`, {
+    timeout: 10000,
+    headers: { referer: `${SIGNANA_BASE_URL}/sector-ranking` }
+  }));
+  const rows = Array.isArray(raw?.rows) ? raw.rows : [];
+  if (!rows.length) throw new Error("完整板块涨跌幅为空");
+  return {
+    date: clean(raw.date || date),
+    updated_at: clean(raw.updated_at || chinaTimeLabel()),
+    source: "完整板块涨跌幅",
+    rows: rows.map(normalizeSectorRankingRow).filter(Boolean)
+  };
+}
+
+function normalizeSectorRankingRow(row) {
+  const code = clean(row?.code || "");
+  const name = clean(row?.name || code);
+  if (!code || !name) return null;
+  const trend = Array.isArray(row.trend_30d) ? row.trend_30d.map(numberOrNull).filter((value) => value != null) : [];
+  return {
+    code,
+    name,
+    close: numberOrNull(row.close),
+    pct_1d: numberOrNull(row.pct_1d),
+    pct_5d: numberOrNull(row.pct_5d),
+    pct_10d: numberOrNull(row.pct_10d),
+    pct_20d: numberOrNull(row.pct_20d),
+    pct_60d: numberOrNull(row.pct_60d),
+    pct_120d: numberOrNull(row.pct_120d),
+    vs_ma5_pct: numberOrNull(row.vs_ma5_pct),
+    vs_ma10_pct: numberOrNull(row.vs_ma10_pct),
+    vs_ma20_pct: numberOrNull(row.vs_ma20_pct),
+    sharpe: numberOrNull(row.sharpe),
+    is_partial: Number(row.is_partial || 0),
+    trend_30d: trend
+  };
+}
+
+async function loadSectorRealtimeRanking(targetDate) {
+  const pageSize = Math.max(30, Math.min(500, SECTOR_CATALOG_LIMIT));
+  const raw = JSON.parse(await fetchWithNodeHttps(`https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=${pageSize}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=f12,f14,f2,f3`, {
+    timeout: 8000,
+    headers: { referer: "https://quote.eastmoney.com/" }
+  }));
+  const rows = uniqueBy([
+    ...SECTOR_PINNED_ROWS.map((item) => ({ f12: item.code, f14: item.name })),
+    ...(raw?.data?.diff || [])
+  ], (item) => item.f12)
+    .map((item) => ({
+      code: clean(item.f12 || "").toUpperCase(),
+      name: clean(item.f14 || item.f12 || ""),
+      close: numberOrNull(item.f2),
+      pct_1d: numberOrNull(item.f3),
+      pct_5d: null,
+      pct_10d: null,
+      pct_20d: null,
+      pct_60d: null,
+      pct_120d: null,
+      vs_ma5_pct: null,
+      vs_ma10_pct: null,
+      vs_ma20_pct: null,
+      sharpe: null,
+      is_partial: 1,
+      trend_30d: numberOrNull(item.f2) == null ? [] : [numberOrNull(item.f2)]
+    }))
+    .filter((item) => /^BK\d{4}$/.test(item.code) && item.name);
+  return {
+    date: targetDate,
+    updated_at: chinaTimeLabel(),
+    rows: rows.sort((a, b) => (numberOrNull(b.pct_1d) ?? -Infinity) - (numberOrNull(a.pct_1d) ?? -Infinity))
+  };
+}
+
+function normalizeSectorDate(dateInput, dates) {
+  const value = clean(dateInput || "latest");
+  if (!value || value === "latest") return dates[0] || chinaDateKey();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error("日期格式不正确");
+  return value;
+}
+
+function buildSectorRankingRow(sector, bars, targetDate) {
+  const index = bars.findIndex((row) => row.tradeDate === targetDate);
+  if (index < 0) return null;
+  const bar = bars[index];
+  const close = numberOrNull(bar.close);
+  if (close == null) return null;
+  const pctFor = (days) => {
+    const previous = bars[index - days]?.close;
+    return previous ? ((close / previous) - 1) * 100 : null;
+  };
+  const maPct = (days) => {
+    const slice = bars.slice(Math.max(0, index - days + 1), index + 1).map((row) => numberOrNull(row.close)).filter((value) => value != null);
+    if (slice.length < days) return null;
+    const ma = sumNumbers(slice) / slice.length;
+    return ma ? ((close / ma) - 1) * 100 : null;
+  };
+  const trend = bars.slice(Math.max(0, index - 29), index + 1).map((row) => numberOrNull(row.close)).filter((value) => value != null);
+  return {
+    code: sector.code,
+    name: sector.name,
+    close,
+    pct_1d: pctFor(1),
+    pct_5d: pctFor(5),
+    pct_10d: pctFor(10),
+    pct_20d: pctFor(20),
+    pct_60d: pctFor(60),
+    pct_120d: pctFor(120),
+    vs_ma5_pct: maPct(5),
+    vs_ma10_pct: maPct(10),
+    vs_ma20_pct: maPct(20),
+    sharpe: sectorSharpe(bars.slice(Math.max(0, index - 30), index + 1)),
+    is_partial: 0,
+    trend_30d: trend
+  };
+}
+
+function sectorSharpe(bars) {
+  const returns = [];
+  for (let index = 1; index < bars.length; index += 1) {
+    const previous = numberOrNull(bars[index - 1]?.close);
+    const current = numberOrNull(bars[index]?.close);
+    if (previous && current != null) returns.push((current / previous) - 1);
+  }
+  if (returns.length < 12) return null;
+  const mean = sumNumbers(returns) / returns.length;
+  const variance = sumNumbers(returns.map((value) => (value - mean) ** 2)) / Math.max(1, returns.length - 1);
+  const stdev = Math.sqrt(variance);
+  return stdev ? (mean / stdev) * Math.sqrt(252) : null;
+}
+
+async function loadSectorFlowDates() {
+  const cachedDates = db.prepare("SELECT DISTINCT tradeDate FROM sector_flow_minutes ORDER BY tradeDate DESC LIMIT 20").all().map((row) => row.tradeDate);
+  const latestFlowDate = await loadLatestSectorFlowDate().catch(() => "");
+  const rankingDates = await loadSectorRankingDates().catch(() => []);
+  return uniqueBy([...cachedDates, latestFlowDate, rankingDates[0]].filter(Boolean).map((date) => ({ date })), (row) => row.date).map((row) => row.date);
+}
+
+async function loadLatestSectorFlowDate() {
+  const raw = JSON.parse(await fetchWithNodeHttps("https://push2delay.eastmoney.com/api/qt/stock/fflow/kline/get?lmt=5&klt=1&secid=90.BK1136&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56", {
+    timeout: 8000,
+    headers: { referer: "https://quote.eastmoney.com/" }
+  }));
+  const latest = raw?.data?.klines?.at?.(-1);
+  const date = clean(String(latest || "").split(/[ ,]/)[0]);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("板块资金流日期不可用");
+  return date;
+}
+
+async function loadSectorFlowSeries(dateInput = "latest") {
+  const dates = await loadSectorFlowDates();
+  const targetDate = normalizeSectorDate(dateInput, dates);
+  const catalog = await loadSectorCatalog();
+  const sectors = sectorFlowUniverse(catalog);
+  const rows = await mapWithConcurrency(sectors, 6, async (sector) => {
+    const minutes = await loadSectorFlowMinutes(sector.code, targetDate);
+    return buildSectorFlowSeries(sector, minutes);
+  });
+  const series = rows.filter(Boolean);
+  const lastSessionMin = Math.max(0, ...series.flatMap((item) => item.data.map((value, index) => value == null ? -1 : index)));
+  return {
+    trade_date: targetDate,
+    title: "资金实时分时流向",
+    session_minutes: 240,
+    last_session_min: Math.min(239, lastSessionMin),
+    ticks: [
+      { value: 0, label: "9:30" },
+      { value: 60, label: "10:30" },
+      { value: 119, label: "11:30" },
+      { value: 180, label: "14:00" },
+      { value: 239, label: "15:00" }
+    ],
+    series
+  };
+}
+
+async function loadSectorFlowMinutes(codeInput, tradeDate) {
+  const code = clean(codeInput).toUpperCase();
+  if (!/^BK\d{4}$/.test(code)) throw new Error("板块代码不正确");
+  const cachedRows = db.prepare("SELECT * FROM sector_flow_minutes WHERE code = ? AND tradeDate = ? ORDER BY minuteIndex").all(code, tradeDate);
+  const latestCached = cachedRows.at(-1);
+  if (latestCached && Date.now() - (Date.parse(latestCached.updatedAt) || 0) < 60 * 1000) return cachedRows;
+  try {
+    const raw = JSON.parse(await fetchWithNodeHttps(`https://push2delay.eastmoney.com/api/qt/stock/fflow/kline/get?lmt=360&klt=1&secid=90.${code}&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56`, {
+      timeout: 8000,
+      headers: { referer: "https://quote.eastmoney.com/" }
+    }));
+    const rows = (raw?.data?.klines || []).map((line) => parseSectorFlowMinute(code, line)).filter((row) => row?.tradeDate === tradeDate);
+    if (!rows.length) {
+      if (cachedRows.length) return cachedRows;
+      return [];
+    }
+    const stmt = db.prepare(`
+      INSERT OR REPLACE INTO sector_flow_minutes (code, tradeDate, minuteIndex, time, mainFlow, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    for (const row of rows) stmt.run(row.code, row.tradeDate, row.minuteIndex, row.time, row.mainFlow, nowIso());
+    return rows;
+  } catch (error) {
+    if (cachedRows.length) return cachedRows;
+    throw error;
+  }
+}
+
+function parseSectorFlowMinute(code, line) {
+  const parts = String(line || "").split(",");
+  if (parts.length < 2) return null;
+  const [datePart, timePart] = String(parts[0] || "").split(" ");
+  const minuteIndex = sectorMinuteIndex(timePart);
+  if (!datePart || minuteIndex == null) return null;
+  return {
+    code,
+    tradeDate: datePart,
+    minuteIndex,
+    time: timePart,
+    mainFlow: numberOrNull(parts[1]) == null ? null : numberOrNull(parts[1]) / 100000000
+  };
+}
+
+function sectorMinuteIndex(timePart) {
+  const match = String(timePart || "").match(/^(\d{2}):(\d{2})$/);
+  if (!match) return null;
+  const minutes = Number(match[1]) * 60 + Number(match[2]);
+  if (minutes >= 9 * 60 + 30 && minutes <= 11 * 60 + 30) return Math.min(119, minutes - (9 * 60 + 30));
+  if (minutes >= 13 * 60 && minutes <= 15 * 60) return Math.min(239, 120 + minutes - (13 * 60));
+  return null;
+}
+
+function buildSectorFlowSeries(sector, minutes) {
+  if (!minutes.length) return null;
+  const data = Array(240).fill(null);
+  for (const row of minutes) {
+    if (row.minuteIndex >= 0 && row.minuteIndex < data.length) data[row.minuteIndex] = numberOrNull(row.mainFlow);
+  }
+  let last = data.find((value) => value != null) ?? 0;
+  for (let index = 0; index < data.length; index += 1) {
+    if (data[index] == null) data[index] = last;
+    else last = data[index];
+  }
+  return {
+    name: sector.name,
+    code: sector.code,
+    color: sectorColor(sector.code),
+    featured: sectorFeaturedScore(sector) < 1000,
+    data
+  };
+}
+
+function sectorColor(code) {
+  const palette = ["#d94f4f", "#2f80ed", "#27ae60", "#f2994a", "#9b51e0", "#00a6a6", "#eb5757", "#6fcf97", "#f2c94c", "#bb6bd9", "#56ccf2", "#b85c38"];
+  const number = Number(String(code || "").replace(/\D/g, "")) || 0;
+  return palette[number % palette.length];
+}
+
+function chinaTimeLabel(date = new Date()) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      try {
+        results[index] = await mapper(items[index], index);
+      } catch (error) {
+        results[index] = null;
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 async function searchStocks(queryInput, limit) {
@@ -3603,6 +4229,31 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/hot-sectors" && req.method === "GET") {
     const limit = clampLimit(url.searchParams.get("limit"));
     return json(res, 200, await cached(`hot-sectors:${limit}`, 180_000, () => loadEastmoneyHotSectors(limit)));
+  }
+
+  if (url.pathname === "/api/mainlines" && req.method === "GET") {
+    const limit = Math.max(1, Math.min(50, Number(url.searchParams.get("limit") || 30) || 30));
+    return json(res, 200, await cached(`mainlines:${limit}`, 180_000, () => loadEastmoneyMainlines(limit)));
+  }
+
+  if (url.pathname === "/api/sectors/flow/dates" && req.method === "GET") {
+    return json(res, 200, await cached("sector-dates:flow", 60_000, async () => ({ dates: await loadSectorFlowDates() })));
+  }
+
+  if (url.pathname === "/api/sectors/flow/series" && req.method === "GET") {
+    const date = clean(url.searchParams.get("date") || "latest");
+    const ttl = date === "latest" ? 60_000 : 10 * 60_000;
+    return json(res, 200, await cached(`sector-flow:${date}`, ttl, () => loadSectorFlowSeries(date)));
+  }
+
+  if (url.pathname === "/api/sectors/ranking/dates" && req.method === "GET") {
+    return json(res, 200, await cached("sector-dates:ranking", 10 * 60_000, async () => ({ dates: await loadSectorRankingDates() })));
+  }
+
+  if (url.pathname === "/api/sectors/ranking" && req.method === "GET") {
+    const date = clean(url.searchParams.get("date") || "latest");
+    const ttl = date === "latest" ? 10 * 60_000 : 60 * 60_000;
+    return json(res, 200, await cached(`sector-ranking:${date}`, ttl, () => loadSectorRanking(date)));
   }
 
   const sectorStocksMatch = url.pathname.match(/^\/api\/sectors\/([^/]+)\/stocks$/);
