@@ -1639,7 +1639,7 @@ function restoreFocusedSearchInput(snapshot) {
 }
 
 function shouldShowBootscreen() {
-  return window.matchMedia?.("(max-width: 760px)")?.matches ?? false;
+  return true;
 }
 
 function bootTemplate() {
