@@ -214,6 +214,7 @@ async function login(event) {
     } finally {
       state.booting = false;
       render();
+      ensureSectorFlowLoaded({ silent: true });
     }
   } catch (error) {
     state.message = error.message;
@@ -237,6 +238,7 @@ async function register(event) {
     } finally {
       state.booting = false;
       render();
+      ensureSectorFlowLoaded({ silent: true });
     }
   } catch (error) {
     state.message = error.message;
@@ -1179,6 +1181,11 @@ async function loadSectorRankingOnly(options = {}) {
   await loadSectorRanking(options);
 }
 
+async function ensureSectorFlowLoaded(options = {}) {
+  if (!state.authed || state.sectorFlow.data || state.loading.has("sectorFlow")) return;
+  await loadSectorFlow(options);
+}
+
 function seedSectorFlowSelection() {
   const series = state.sectorFlow.data?.series || [];
   if (state.sectorFlowSelected.size || !series.length) return;
@@ -1191,6 +1198,7 @@ function switchSectorMode(mode) {
   state.sectorMode = ["flow", "ranking"].includes(mode) ? mode : "overview";
   stopSectorReplay();
   render();
+  if (state.sectorMode === "flow") ensureSectorFlowLoaded();
 }
 
 function changeSectorFlowDate(value) {
@@ -4574,6 +4582,7 @@ api("/api/market/overview").then((result) => {
   refreshAll().finally(() => {
     state.booting = false;
     render();
+    ensureSectorFlowLoaded({ silent: true });
   });
 }).catch(() => render());
 
