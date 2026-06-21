@@ -1849,7 +1849,10 @@ function bindEvents() {
   }
   const dsaSearchInput = document.querySelector("[data-dsa-search-input]");
   if (dsaSearchInput) {
-    dsaSearchInput.addEventListener("focus", () => {
+    dsaSearchInput.addEventListener("pointerdown", () => {
+      markSearchInput("dsa");
+    });
+    dsaSearchInput.addEventListener("keydown", () => {
       markSearchInput("dsa");
     });
     dsaSearchInput.addEventListener("compositionstart", startDsaSearchComposition);
@@ -1879,7 +1882,10 @@ function bindEvents() {
   document.querySelectorAll("[data-dsa-refresh-history]").forEach((el) => el.addEventListener("click", () => loadDsaHistory()));
   const stockSearchInput = document.querySelector("[data-stock-search-input]");
   if (stockSearchInput) {
-    stockSearchInput.addEventListener("focus", () => {
+    stockSearchInput.addEventListener("pointerdown", () => {
+      markSearchInput("stock");
+    });
+    stockSearchInput.addEventListener("keydown", () => {
       markSearchInput("stock");
     });
     stockSearchInput.addEventListener("compositionstart", startStockSearchComposition);
