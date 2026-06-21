@@ -109,6 +109,7 @@ let dsaPollTimer = null;
 let dsaPollInFlight = false;
 let sectorReplayTimer = null;
 let sectorReplayToken = 0;
+let redirectingSearchFocus = false;
 
 window.addEventListener("scroll", () => {
   if (state.lockedPageScrollTop != null) {
@@ -979,6 +980,21 @@ async function runStockSearch(queryInput, options = {}) {
 function markSearchInput(kind) {
   state.activeSearchInput = kind;
   state.activeSearchInputAt = Date.now();
+}
+
+function redirectUnexpectedSearchFocus(event) {
+  if (redirectingSearchFocus) return;
+  const target = event.target;
+  if (!target?.matches?.("[data-stock-search-input]")) return;
+  if (state.activeSearchInput !== "dsa" || Date.now() - state.activeSearchInputAt > 15000) return;
+  const dsaInput = document.querySelector("[data-dsa-search-input]");
+  if (!dsaInput) return;
+  redirectingSearchFocus = true;
+  requestAnimationFrame(() => {
+    dsaInput.focus();
+    dsaInput.setSelectionRange(dsaInput.value.length, dsaInput.value.length);
+    redirectingSearchFocus = false;
+  });
 }
 
 function scheduleStockSearch(event) {
@@ -1882,6 +1898,7 @@ function bindEvents() {
   document.querySelectorAll("[data-dsa-refresh-history]").forEach((el) => el.addEventListener("click", () => loadDsaHistory()));
   const stockSearchInput = document.querySelector("[data-stock-search-input]");
   if (stockSearchInput) {
+    stockSearchInput.addEventListener("focusin", redirectUnexpectedSearchFocus);
     stockSearchInput.addEventListener("pointerdown", () => {
       markSearchInput("stock");
     });
