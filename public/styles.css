@@ -85,7 +85,7 @@ a {
 }
 
 .boot-card {
-  width: min(420px, 100%);
+  width: min(760px, 100%);
   display: grid;
   justify-items: center;
   gap: 14px;
@@ -118,32 +118,101 @@ a {
   font-size: 14px;
 }
 
+.boot-progress {
+  width: min(520px, 100%);
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.boot-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), #14b8a6);
+  transition: width 0.25s ease;
+}
+
+.boot-count {
+  margin: -4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .boot-steps {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
 .boot-steps span {
   border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 5px 9px;
+  border-radius: 8px;
+  padding: 8px 10px;
   background: #fff;
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+  text-align: left;
 }
 
-.boot-steps span.active {
+.boot-steps b,
+.boot-steps em {
+  display: block;
+  font-style: normal;
+}
+
+.boot-steps b {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.boot-steps em {
+  margin-top: 2px;
+  color: var(--muted);
+}
+
+.boot-step.loading {
   border-color: #99f6e4;
   background: #f0fdfa;
   color: var(--accent);
 }
 
+.boot-step.loading em,
+.boot-step.done em {
+  color: var(--accent);
+}
+
+.boot-step.degraded {
+  border-color: #fed7aa;
+  background: #fff7ed;
+}
+
+.boot-step.degraded em {
+  color: #c2410c;
+}
+
 @keyframes boot-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 760px) {
+  .boot-card {
+    width: 100%;
+    padding: 26px 18px;
+  }
+
+  .boot-card h1 {
+    font-size: 28px;
+  }
+
+  .boot-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

@@ -77,6 +77,7 @@ const state = {
   defaultPassword: "",
   loading: new Set(),
   booting: false,
+  bootTasks: {},
   appVersion: "",
   latestAppVersion: "",
   updateAvailable: false,
@@ -84,6 +85,19 @@ const state = {
 };
 
 const baseTabs = ["行情", "AI分析", "资讯", "热度", "板块", "自选股", "使用手册"];
+const bootTaskDefinitions = [
+  ["market", "核心行情"],
+  ["aShareAnalysis", "A 股大盘"],
+  ["jin10", "金十资讯"],
+  ["eastmoneyNews", "东财资讯"],
+  ["hotTopics", "热股/主线"],
+  ["sectors", "概念板块"],
+  ["watchlist", "自选股"],
+  ["posts", "股吧帖子"],
+  ["reportSettings", "收盘日报"],
+  ["adminUsers", "管理员数据"],
+  ["dsaHistory", "AI 分析历史"]
+];
 const app = document.querySelector("#app");
 let stockSearchTimer = null;
 let stockSearchComposing = false;
@@ -139,6 +153,51 @@ function setLoading(key, value) {
   render();
 }
 
+function resetBootTasks() {
+  state.bootTasks = Object.fromEntries(bootTaskDefinitions.map(([key]) => [key, { status: "pending", message: "" }]));
+}
+
+function updateBootTask(key, status, message = "") {
+  state.bootTasks = {
+    ...state.bootTasks,
+    [key]: { status, message }
+  };
+  if (state.booting) render();
+}
+
+async function runBootTask(key, task) {
+  updateBootTask(key, "loading");
+  try {
+    await task();
+    updateBootTask(key, bootTaskHasDegraded(key) ? "degraded" : "done");
+  } catch (error) {
+    updateBootTask(key, "degraded", error.message || "加载降级");
+  }
+}
+
+function bootTaskHasDegraded(key) {
+  const hasError = (envelope) => Boolean(envelope?.stale && envelope?.errorMessage);
+  const taskErrors = {
+    market: () => hasError(state.market),
+    aShareAnalysis: () => hasError(state.aShareAnalysis),
+    jin10: () => hasError(state.jin10),
+    eastmoneyNews: () => hasError(state.eastmoneyNews),
+    hotTopics: () => hasError(state.mainlines) || hasError(state.hotStocks),
+    sectors: () => hasError(state.sectorFlowDates) || hasError(state.sectorRankingDates) || hasError(state.sectorFlow) || hasError(state.sectorRanking),
+    watchlist: () => Boolean(state.message),
+    posts: () => hasError(state.posts.guba),
+    reportSettings: () => hasError(state.reportSettings),
+    adminUsers: () => state.user?.isAdmin && hasError(state.adminUsers),
+    dsaHistory: () => state.dsaConfig.data?.configured && hasError(state.dsaHistory)
+  };
+  return taskErrors[key]?.() || false;
+}
+
+function startBootscreen() {
+  state.booting = shouldShowBootscreen();
+  if (state.booting) resetBootTasks();
+}
+
 async function login(event) {
   event.preventDefault();
   const username = new FormData(event.target).get("username");
@@ -147,7 +206,7 @@ async function login(event) {
     const result = await api("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) });
     state.user = result.user || null;
     state.authed = true;
-    state.booting = shouldShowBootscreen();
+    startBootscreen();
     state.message = "";
     render();
     try {
@@ -170,7 +229,7 @@ async function register(event) {
     const result = await api("/api/auth/register", { method: "POST", body: JSON.stringify(data) });
     state.user = result.user || null;
     state.authed = true;
-    state.booting = shouldShowBootscreen();
+    startBootscreen();
     state.message = "";
     render();
     try {
@@ -226,6 +285,7 @@ async function logout() {
   state.authed = false;
   state.user = null;
   state.booting = false;
+  state.bootTasks = {};
   render();
 }
 
@@ -1226,6 +1286,10 @@ function csvCell(value) {
 async function refreshAll(options = {}) {
   await loadMe();
   await loadDsaConfig();
+  if (state.booting) {
+    await refreshAllWithBootProgress(options);
+    return;
+  }
   if (options.priorityMarket) {
     await loadEnvelopeWithOptions("market", "/api/market/overview", { retryOnce: true });
   }
@@ -1241,6 +1305,33 @@ async function refreshAll(options = {}) {
     loadReportSettings(),
     loadAdminUsers(),
     state.dsaConfig.data?.configured ? loadDsaHistory({ silent: true }) : Promise.resolve()
+  ]);
+}
+
+async function refreshAllWithBootProgress(options = {}) {
+  if (!Object.keys(state.bootTasks).length) resetBootTasks();
+  if (options.priorityMarket) {
+    await runBootTask("market", () => loadEnvelopeWithOptions("market", "/api/market/overview", { retryOnce: true }));
+  }
+  await runBootTask("watchlist", () => loadWatchlist({ skipPosts: true }));
+  await Promise.all([
+    options.priorityMarket
+      ? Promise.resolve()
+      : runBootTask("market", () => loadEnvelopeWithOptions("market", "/api/market/overview", { retryOnce: true })),
+    runBootTask("aShareAnalysis", () => loadEnvelope("aShareAnalysis", "/api/market/a-share-analysis")),
+    runBootTask("jin10", () => loadEnvelope("jin10", "/api/news/jin10?limit=10")),
+    runBootTask("eastmoneyNews", () => loadEnvelope("eastmoneyNews", "/api/news/eastmoney-hot?limit=10")),
+    runBootTask("hotTopics", async () => {
+      await Promise.all([
+        loadEnvelope("mainlines", "/api/mainlines?limit=30"),
+        loadEnvelope("hotStocks", "/api/hot-stocks?limit=10")
+      ]);
+    }),
+    runBootTask("sectors", () => loadSectors()),
+    runBootTask("posts", () => state.selectedSymbol ? loadPosts(state.selectedSymbol) : Promise.resolve()),
+    runBootTask("reportSettings", () => loadReportSettings()),
+    runBootTask("adminUsers", () => loadAdminUsers()),
+    runBootTask("dsaHistory", () => state.dsaConfig.data?.configured ? loadDsaHistory({ silent: true }) : Promise.resolve())
   ]);
 }
 
@@ -1643,27 +1734,42 @@ function shouldShowBootscreen() {
 }
 
 function bootTemplate() {
-  const steps = [
-    ["market", "核心行情"],
-    ["aShareAnalysis", "A 股大盘"],
-    ["jin10", "资讯"],
-    ["hotStocks", "热度"],
-    ["watchlist", "自选股"],
-    ["dsaAnalysis", "AI 分析"]
-  ];
+  const tasks = bootTaskDefinitions.map(([key, label]) => ({ key, label, ...(state.bootTasks[key] || { status: "pending", message: "" }) }));
+  const finished = tasks.filter((task) => task.status === "done" || task.status === "degraded").length;
+  const degraded = tasks.filter((task) => task.status === "degraded").length;
+  const active = tasks.find((task) => task.status === "loading");
+  const progress = tasks.length ? Math.round((finished / tasks.length) * 100) : 0;
   return `
     <main class="boot-shell">
       <section class="boot-card">
         <p class="eyebrow">Asia/Shanghai</p>
         <h1>股市信息综合看板</h1>
         <div class="boot-loader" aria-hidden="true"></div>
-        <p class="boot-text">正在同步行情、资讯、热度、自选股和 AI 分析</p>
+        <p class="boot-text">${active ? `正在加载：${escapeHtml(active.label)}` : "正在准备首轮数据"}</p>
+        <div class="boot-progress" aria-label="启动加载进度">
+          <span style="width:${progress}%"></span>
+        </div>
+        <p class="boot-count">${finished}/${tasks.length} 已完成${degraded ? ` · ${degraded} 项已降级` : ""}</p>
         <div class="boot-steps">
-          ${steps.map(([key, label]) => `<span class="${state.loading.has(key) ? "active" : "done"}">${label}</span>`).join("")}
+          ${tasks.map((task) => `
+            <span class="${escapeAttr(`boot-step ${task.status}`)}">
+              <b>${escapeHtml(task.label)}</b>
+              <em>${escapeHtml(bootStatusText(task.status))}</em>
+            </span>
+          `).join("")}
         </div>
       </section>
     </main>
   `;
+}
+
+function bootStatusText(status) {
+  return {
+    pending: "等待中",
+    loading: "加载中",
+    done: "已完成",
+    degraded: "已降级"
+  }[status] || "等待中";
 }
 
 function bindEvents() {
@@ -4456,7 +4562,7 @@ registerServiceWorker();
 api("/api/market/overview").then((result) => {
   state.market = result;
   state.authed = true;
-  state.booting = shouldShowBootscreen();
+  startBootscreen();
   render();
   refreshAll().finally(() => {
     state.booting = false;
