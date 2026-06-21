@@ -400,6 +400,11 @@ async function submitDsaAnalysis(event) {
   const data = Object.fromEntries(new FormData(form));
   const query = String(data.stock || "").trim();
   if (!query) return;
+  markSearchInput("dsa");
+  if (dsaSearchTimer) {
+    clearTimeout(dsaSearchTimer);
+    dsaSearchTimer = null;
+  }
   state.dsaQuery = query;
   state.dsaSearch = { query: "", results: emptyEnvelope([]) };
   state.dsaMessage = "";
@@ -3016,6 +3021,7 @@ function dsaSearchResultsTemplate() {
   if (state.loading.has("dsaSearch")) {
     return `<div class="dsa-search-results compact"><span class="loading">匹配中</span></div>`;
   }
+  if (state.loading.has("dsaAnalysis")) return "";
   if (results.length) {
     return `
       <div class="dsa-search-results">

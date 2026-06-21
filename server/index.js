@@ -3901,6 +3901,18 @@ function nullableNumber(value) {
 async function lookupStock(symbolInput) {
   const input = clean(symbolInput).toUpperCase();
   if (!input) throw new Error("股票关键词不能为空");
+  const localMatches = await searchStocks(input, 5).catch(() => []);
+  const exactLocal = localMatches.find((item) => normalizeSearchText(item.symbol) === normalizeSearchText(input))
+    || localMatches.find((item) => normalizeSearchText(item.name) === normalizeSearchText(input))
+    || (/^\d{6}$/.test(input) ? localMatches.find((item) => item.symbol === input) : null);
+  if (exactLocal) {
+    return {
+      symbol: exactLocal.symbol,
+      name: exactLocal.name,
+      market: exactLocal.market || inferMarket(exactLocal.symbol),
+      quoteId: exactLocal.quoteId || eastmoneySecidFromSymbol(exactLocal.symbol, exactLocal.market)
+    };
+  }
   const url = `https://searchapi.eastmoney.com/api/suggest/get?input=${encodeURIComponent(input)}&type=14&token=44c9d251add88e27b65ed86506f6e5da`;
   const raw = await fetchJson(url, { allowCurlFallback: true });
   const rows = raw?.QuotationCodeTable?.Data || [];
