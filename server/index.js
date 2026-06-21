@@ -753,6 +753,30 @@ function ashareSessionState() {
   return "trading";
 }
 
+function isChinaWeekend(date = new Date()) {
+  const weekday = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Shanghai",
+    weekday: "short"
+  }).format(date);
+  return weekday === "Sat" || weekday === "Sun";
+}
+
+async function isAshareTradingDayForDailyReport() {
+  if (isChinaWeekend()) return { tradingDay: false, reason: "weekend" };
+  const today = chinaDateParts().full;
+  try {
+    const pair = await loadIndexTurnoverPair("1.000001");
+    const latestDate = clean(pair?.latestDate || "");
+    return {
+      tradingDay: latestDate === today,
+      reason: latestDate === today ? "index-daily-match" : `latest-index-date-${latestDate || "empty"}`
+    };
+  } catch (error) {
+    console.warn(`daily report trading-day check failed; fail open: ${readableError(error)}`);
+    return { tradingDay: true, reason: "calendar-check-failed-open" };
+  }
+}
+
 async function loadIndexPreviousTurnover(secid) {
   const pair = await loadIndexTurnoverPair(secid);
   const today = chinaDateParts().full;
@@ -2519,6 +2543,11 @@ function dotStuffEmailBody(value) {
 }
 
 async function runScheduledDailyReports() {
+  const tradingDay = await isAshareTradingDayForDailyReport();
+  if (!tradingDay.tradingDay) {
+    console.log(`skip watchlist daily report: A-share market closed (${tradingDay.reason})`);
+    return [{ skipped: true, status: "skipped", reason: tradingDay.reason, message: "A 股休市日不发送收盘日报" }];
+  }
   const users = listDailyReportUsers();
   const results = [];
   for (const user of users) {
