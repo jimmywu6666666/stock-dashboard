@@ -3499,7 +3499,7 @@ function sectorFeatureTemplate() {
 function sectorOverviewTemplate() {
   const rankingRows = [...(state.sectorRanking.data?.rows || [])].sort((a, b) => (numberOrNull(a.source_rank) ?? Infinity) - (numberOrNull(b.source_rank) ?? Infinity));
   const flowRows = (state.sectorFlow.data?.series || [])
-    .map((item) => ({ ...item, latest: numberOrNull((item.data || []).at(state.sectorFlow.data?.last_session_min ?? -1) ?? (item.data || []).at(-1)) }))
+    .map((item) => ({ ...item, latest: lastNonNullNumber(item.data || []) }))
     .sort((a, b) => (numberOrNull(a.source_rank) ?? Infinity) - (numberOrNull(b.source_rank) ?? Infinity));
   return `
     <div class="sector-overview-grid">
@@ -4740,6 +4740,14 @@ function numberOrNull(value) {
   if (value == null || value === "") return null;
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
+}
+
+function lastNonNullNumber(values) {
+  for (let index = (values || []).length - 1; index >= 0; index -= 1) {
+    const value = numberOrNull(values[index]);
+    if (value != null) return value;
+  }
+  return null;
 }
 
 function formatSigned(value) {
