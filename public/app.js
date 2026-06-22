@@ -1999,6 +1999,10 @@ function bindEvents() {
   document.querySelectorAll("[data-sector-ranking-date]").forEach((el) => el.addEventListener("change", () => changeSectorRankingDate(el.value)));
   document.querySelectorAll("[data-sector-flow-code]").forEach((el) => el.addEventListener("change", () => toggleSectorFlowCode(el.dataset.sectorFlowCode, el.checked)));
   document.querySelectorAll("[data-sector-flow-preset]").forEach((el) => el.addEventListener("click", () => selectSectorFlowPreset(el.dataset.sectorFlowPreset)));
+  document.querySelectorAll("[data-sector-flow-chart]").forEach((el) => {
+    el.addEventListener("pointermove", updateSectorFlowHover);
+    el.addEventListener("pointerleave", clearSectorFlowHover);
+  });
   document.querySelectorAll("[data-sector-replay]").forEach((el) => {
     el.addEventListener("pointerdown", (event) => {
       event.preventDefault();
@@ -3631,7 +3635,7 @@ function sectorFlowSvg(data) {
     `;
   }).join("");
   return `
-    <svg class="sector-flow-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="板块资金流向">
+    <svg class="sector-flow-svg" data-sector-flow-chart viewBox="0 0 ${width} ${height}" role="img" aria-label="板块资金流向">
       <rect class="chart-bg" x="0" y="0" width="${width}" height="${height}" />
       <text class="chart-axis" x="12" y="20">亿元</text>
       ${gridValues.map((value) => {
@@ -3641,8 +3645,102 @@ function sectorFlowSvg(data) {
       ${(data.ticks || []).map((tick) => `<text class="chart-x-label" x="${xFor(tick.value).toFixed(1)}" y="${height - 12}">${escapeHtml(tick.label)}</text>`).join("")}
       <line class="chart-grid zero" x1="${left}" y1="${yFor(0).toFixed(1)}" x2="${width - right}" y2="${yFor(0).toFixed(1)}" />
       ${paths || `<text class="chart-axis" x="${left + 20}" y="${top + 40}">请选择右侧板块</text>`}
+      <g data-sector-flow-hover-layer></g>
     </svg>
   `;
+}
+
+function updateSectorFlowHover(event) {
+  const svg = event.currentTarget;
+  const layer = svg.querySelector("[data-sector-flow-hover-layer]");
+  const data = state.sectorFlow.data;
+  if (!layer || !data?.series?.length) return;
+  const metrics = sectorFlowHoverMetrics(data);
+  if (!metrics.series.length) {
+    layer.innerHTML = "";
+    return;
+  }
+  const rect = svg.getBoundingClientRect();
+  const x = ((event.clientX - rect.left) / Math.max(1, rect.width)) * metrics.width;
+  const boundedX = Math.max(metrics.left, Math.min(metrics.width - metrics.right, x));
+  const rawIndex = Math.round(((boundedX - metrics.left) / Math.max(1, metrics.chartWidth)) * Math.max(1, metrics.sessionMinutes - 1));
+  const index = Math.max(0, Math.min(metrics.cursor, rawIndex));
+  const hoverX = metrics.xFor(index);
+  const rows = metrics.series
+    .map((item) => ({ ...item, value: numberOrNull(item.data[index]), y: metrics.yFor(numberOrNull(item.data[index]) || 0) }))
+    .filter((item) => item.value != null)
+    .sort((a, b) => Number(b.value) - Number(a.value));
+  if (!rows.length) {
+    layer.innerHTML = "";
+    return;
+  }
+  const maxRows = 16;
+  const displayRows = rows.slice(0, maxRows);
+  const hiddenCount = rows.length - displayRows.length;
+  const rowHeight = 20;
+  const tooltipWidth = 190;
+  const tooltipHeight = 34 + displayRows.length * rowHeight + (hiddenCount ? 18 : 0);
+  const tooltipX = hoverX + tooltipWidth + 14 > metrics.width ? hoverX - tooltipWidth - 14 : hoverX + 14;
+  const tooltipY = Math.max(8, Math.min(metrics.height - tooltipHeight - 8, metrics.top + 4));
+  const time = sectorMinuteLabel(index);
+  layer.innerHTML = `
+    <line class="sector-flow-hover-line" x1="${hoverX.toFixed(1)}" y1="${metrics.top}" x2="${hoverX.toFixed(1)}" y2="${metrics.height - metrics.bottom}" />
+    ${rows.map((item) => `<circle class="sector-flow-hover-point" cx="${hoverX.toFixed(1)}" cy="${item.y.toFixed(1)}" r="3.6" fill="${escapeAttr(item.color || "#64748b")}" />`).join("")}
+    <g class="sector-flow-tooltip">
+      <rect x="${tooltipX.toFixed(1)}" y="${tooltipY.toFixed(1)}" width="${tooltipWidth}" height="${tooltipHeight}" rx="6" />
+      <text class="sector-flow-tooltip-time" x="${(tooltipX + 12).toFixed(1)}" y="${(tooltipY + 22).toFixed(1)}">${escapeHtml(time)}</text>
+      ${displayRows.map((item, rowIndex) => {
+        const y = tooltipY + 44 + rowIndex * rowHeight;
+        return `
+          <circle cx="${(tooltipX + 14).toFixed(1)}" cy="${(y - 5).toFixed(1)}" r="4" fill="${escapeAttr(item.color || "#64748b")}" />
+          <text class="sector-flow-tooltip-name" x="${(tooltipX + 26).toFixed(1)}" y="${y.toFixed(1)}">${escapeHtml(item.name)}</text>
+          <text class="sector-flow-tooltip-value" x="${(tooltipX + tooltipWidth - 12).toFixed(1)}" y="${y.toFixed(1)}">${formatSignedFixed(item.value, 2)}</text>
+        `;
+      }).join("")}
+      ${hiddenCount ? `<text class="sector-flow-tooltip-more" x="${(tooltipX + 12).toFixed(1)}" y="${(tooltipY + tooltipHeight - 8).toFixed(1)}">另 ${hiddenCount} 个板块未显示</text>` : ""}
+    </g>
+  `;
+}
+
+function clearSectorFlowHover(event) {
+  const layer = event.currentTarget.querySelector("[data-sector-flow-hover-layer]");
+  if (layer) layer.innerHTML = "";
+}
+
+function sectorFlowHoverMetrics(data) {
+  const width = 920;
+  const height = 420;
+  const left = 62;
+  const right = 130;
+  const top = 28;
+  const bottom = 42;
+  const sessionMinutes = data.session_minutes || 240;
+  const cursor = Math.max(1, Math.min(sessionMinutes - 1, state.sectorFlowCursor ?? data.last_session_min ?? sessionMinutes - 1));
+  const series = (data.series || [])
+    .filter((item) => state.sectorFlowSelected.has(item.code))
+    .map((item) => ({ ...item, data: (item.data || []).slice(0, cursor + 1) }));
+  const values = series.flatMap((item) => item.data).filter((value) => value != null && Number.isFinite(Number(value))).map(Number);
+  const minRaw = Math.min(0, ...values);
+  const maxRaw = Math.max(0, ...values);
+  const pad = Math.max((maxRaw - minRaw) * 0.08, 1);
+  const minValue = minRaw - pad;
+  const maxValue = maxRaw + pad;
+  const chartWidth = width - left - right;
+  const chartHeight = height - top - bottom;
+  return {
+    width,
+    height,
+    left,
+    right,
+    top,
+    bottom,
+    sessionMinutes,
+    cursor,
+    chartWidth,
+    series,
+    xFor: (index) => left + (index / Math.max(1, sessionMinutes - 1)) * chartWidth,
+    yFor: (value) => top + ((maxValue - Number(value || 0)) / Math.max(1, maxValue - minValue)) * chartHeight
+  };
 }
 
 function sectorFlowPicker(series, data = null) {
