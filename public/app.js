@@ -1375,7 +1375,7 @@ async function refreshAllWithBootProgress(options = {}) {
         loadEnvelope("hotStocks", "/api/hot-stocks?limit=10")
       ]);
     }),
-    runBootTask("sectors", () => loadSectorRankingOnly()),
+    runBootTask("sectors", () => loadSectors({ silent: true })),
     runBootTask("posts", () => state.selectedSymbol ? loadPosts(state.selectedSymbol) : Promise.resolve()),
     runBootTask("reportSettings", () => loadReportSettings()),
     runBootTask("adminUsers", () => loadAdminUsers()),
@@ -3459,7 +3459,7 @@ function sectorOverviewTemplate() {
 }
 
 function sectorOverviewRanking(rows) {
-  if (state.loading.has("sectorRanking") && !rows.length) return `<div class="card-loading">加载中...</div>`;
+  if (!state.sectorRanking.data || (state.loading.has("sectorRanking") && !rows.length)) return `<div class="card-loading">加载中...</div>`;
   if (!rows.length) return emptyState("暂无涨跌幅数据");
   const gainers = rows.slice(0, 3);
   const losers = rows.filter((row) => numberOrNull(row.pct_1d) != null).sort((a, b) => (numberOrNull(a.pct_1d) ?? Infinity) - (numberOrNull(b.pct_1d) ?? Infinity)).slice(0, 3);
@@ -3486,7 +3486,7 @@ function overviewRankRow(row, index, side) {
 }
 
 function sectorOverviewFlow(rows) {
-  if (state.loading.has("sectorFlow") && !rows.length) return `<div class="card-loading">加载中...</div>`;
+  if (!state.sectorFlow.data || (state.loading.has("sectorFlow") && !rows.length)) return `<div class="card-loading">加载中...</div>`;
   if (!rows.length) return emptyState("暂无资金流数据");
   const legendRows = rows.slice(0, 6);
   return `
