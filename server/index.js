@@ -49,7 +49,7 @@ const SECTOR_FEATURED_SEARCH_NAMES = [
   "存储芯片", "铜缆高速连接", "高速连接器", "玻璃基板", "固态电池", "创新药", "券商"
 ];
 const SECTOR_PINNED_ROWS = [
-  { code: "BK0473", name: "券商" },
+  { code: "BK0711", name: "券商" },
   { code: "BK1136", name: "光通信模块" },
   { code: "BK1128", name: "CPO概念" },
   { code: "BK1036", name: "半导体" },
@@ -1771,8 +1771,9 @@ async function fetchSectorHistoryJson(pathValue) {
   let lastError = null;
   for (const host of hosts) {
     try {
-      const textValue = await fetchWithNodeHttps(`https://${host}${pathValue}`, {
+      const textValue = await fetchText(`https://${host}${pathValue}`, {
         timeout: 8000,
+        allowCurlFallback: true,
         headers: { referer: "https://quote.eastmoney.com/" }
       });
       const raw = JSON.parse(textValue);
@@ -1885,13 +1886,40 @@ async function mergePinnedSectorRankingRows(rows, targetDate) {
     }
   });
   return uniqueBy([...currentRows, ...additions.filter(Boolean)], (row) => row.code)
-    .map((row, index) => ({ ...row, source_rank: numberOrNull(row.source_rank) ?? index + 1 }));
+    .sort((a, b) => (numberOrNull(b.pct_1d) ?? -Infinity) - (numberOrNull(a.pct_1d) ?? -Infinity))
+    .map((row, index) => ({ ...row, source_rank: index + 1 }));
 }
 
 async function loadSectorRealtimeRankingRow(sector, sourceRank = 0) {
   const code = clean(sector?.code).toUpperCase();
   if (!/^BK\d{4}$/.test(code)) return null;
-  const raw = await fetchJson(`https://push2delay.eastmoney.com/api/qt/stock/get?fltt=2&invt=2&secid=90.${code}&fields=f43,f57,f58,f170`, {
+  const fields = "f12,f14,f2,f3,f109,f160";
+  const listRaw = await fetchJson(`https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=500&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=${fields}`, {
+    allowCurlFallback: true,
+    headers: { referer: "https://quote.eastmoney.com/" }
+  }).catch(() => null);
+  const item = (listRaw?.data?.diff || []).find((row) => clean(row.f12).toUpperCase() === code);
+  if (item) {
+    return {
+      code,
+      name: clean(sector?.name || item.f14 || code),
+      source_rank: sourceRank + 1,
+      close: numberOrNull(item.f2),
+      pct_1d: numberOrNull(item.f3),
+      pct_5d: numberOrNull(item.f109),
+      pct_10d: numberOrNull(item.f160),
+      pct_20d: null,
+      pct_60d: null,
+      pct_120d: null,
+      vs_ma5_pct: null,
+      vs_ma10_pct: null,
+      vs_ma20_pct: null,
+      sharpe: null,
+      is_partial: 1,
+      trend_30d: []
+    };
+  }
+  const raw = await fetchJson(`https://push2delay.eastmoney.com/api/qt/stock/get?fltt=2&invt=2&secid=90.${code}&fields=f43,f57,f58,f109,f160,f170`, {
     allowCurlFallback: true,
     headers: { referer: "https://quote.eastmoney.com/" }
   });
@@ -1902,8 +1930,8 @@ async function loadSectorRealtimeRankingRow(sector, sourceRank = 0) {
     source_rank: sourceRank + 1,
     close: numberOrNull(data.f43),
     pct_1d: numberOrNull(data.f170),
-    pct_5d: null,
-    pct_10d: null,
+    pct_5d: numberOrNull(data.f109),
+    pct_10d: numberOrNull(data.f160),
     pct_20d: null,
     pct_60d: null,
     pct_120d: null,
