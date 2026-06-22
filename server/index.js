@@ -2005,7 +2005,8 @@ async function loadSectorFlowSeries(dateInput = "latest") {
     const minutes = await loadSectorFlowMinutes(sector.code, targetDate);
     return buildSectorFlowSeries(sector, minutes);
   });
-  const series = rows.filter(Boolean).sort((a, b) => (numberOrNull(a.source_rank) ?? Infinity) - (numberOrNull(b.source_rank) ?? Infinity));
+  const series = applySectorFlowColors(rows.filter(Boolean))
+    .sort((a, b) => (numberOrNull(a.source_rank) ?? Infinity) - (numberOrNull(b.source_rank) ?? Infinity));
   const lastSessionMin = Math.max(0, ...series.flatMap((item) => item.data.map((value, index) => value == null ? -1 : index)));
   return {
     trade_date: targetDate,
@@ -2113,18 +2114,85 @@ function buildSectorFlowSeries(sector, minutes) {
   return {
     name: sector.name,
     code: sector.code,
-    color: sectorColor(sector.code, sector.source_rank),
     source_rank: numberOrNull(sector.source_rank),
+    latest_flow: lastNonNull(data),
     featured: Number(sector.featured || 0) > 0 || sectorFeaturedScore(sector) < 1000,
     data
   };
 }
 
-function sectorColor(code, sourceRank = null) {
-  const palette = ["#d94f4f", "#2f80ed", "#27ae60", "#f2994a", "#9b51e0", "#00a6a6", "#eb5757", "#6fcf97", "#f2c94c", "#bb6bd9", "#56ccf2", "#b85c38"];
-  const rank = numberOrNull(sourceRank);
-  const number = rank == null ? Number(String(code || "").replace(/\D/g, "")) || 0 : Math.max(0, rank - 1);
-  return palette[number % palette.length];
+const SECTOR_FLOW_WARM_COLORS = [
+  "#DC2626", "#e33737", "#ea4949", "#ee5c5c", "#f16e6e", "#F58787", "#f8a0a0",
+  "#fdb06a", "#FCC99A"
+];
+const SECTOR_FLOW_COOL_COLORS = [
+  "#A8C5E8", "#86afda", "#689acc", "#5186bf", "#3f74b0", "#2E62A0", "#245191"
+];
+const SECTOR_FLOW_WEAK_COLORS = [
+  "#8cd0bc", "#90eeba", "#6EE7A3", "#4bdc8c", "#30cf77", "#23bf69", "#1bb05a", "#16A34A"
+];
+
+function applySectorFlowColors(series) {
+  const ranked = [...series].sort((a, b) => {
+    const av = flowNumberOrNull(a.latest_flow);
+    const bv = flowNumberOrNull(b.latest_flow);
+    if (av == null && bv == null) return (numberOrNull(a.source_rank) ?? Infinity) - (numberOrNull(b.source_rank) ?? Infinity);
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return bv - av;
+  });
+  const positive = ranked.filter((item) => {
+    const value = flowNumberOrNull(item.latest_flow);
+    return value != null && value > 0;
+  });
+  const negative = ranked.filter((item) => {
+    const value = flowNumberOrNull(item.latest_flow);
+    return value != null && value <= 0;
+  });
+  const maxOutflow = Math.max(...negative.map((item) => Math.abs(flowNumberOrNull(item.latest_flow) || 0)), 0);
+  const lightOutflow = [];
+  const heavyOutflow = [];
+  negative.forEach((item) => {
+    const value = Math.abs(flowNumberOrNull(item.latest_flow) || 0);
+    const ratio = maxOutflow > 0 ? value / maxOutflow : 0;
+    if (ratio >= 0.38) heavyOutflow.push(item);
+    else lightOutflow.push(item);
+  });
+
+  const colorByCode = new Map();
+  positive.forEach((item, index) => {
+    colorByCode.set(item.code, colorFromPalette(SECTOR_FLOW_WARM_COLORS, index, positive.length));
+  });
+  lightOutflow.forEach((item, index) => {
+    colorByCode.set(item.code, colorFromPalette(SECTOR_FLOW_COOL_COLORS, index, lightOutflow.length));
+  });
+  heavyOutflow.forEach((item, index) => {
+    colorByCode.set(item.code, colorFromPalette(SECTOR_FLOW_WEAK_COLORS, index, heavyOutflow.length));
+  });
+
+  return series.map((item) => ({
+    ...item,
+    color: colorByCode.get(item.code) || SECTOR_FLOW_WEAK_COLORS.at(-1)
+  }));
+}
+
+function colorFromPalette(palette, index, count) {
+  if (count <= 1) return palette[0];
+  const colorIndex = Math.round((index / (count - 1)) * (palette.length - 1));
+  return palette[Math.max(0, Math.min(palette.length - 1, colorIndex))];
+}
+
+function lastNonNull(values) {
+  for (let index = (values || []).length - 1; index >= 0; index -= 1) {
+    if (values[index] == null) continue;
+    const value = numberOrNull(values[index]);
+    if (value != null) return value;
+  }
+  return null;
+}
+
+function flowNumberOrNull(value) {
+  return value == null ? null : numberOrNull(value);
 }
 
 function chinaTimeLabel(date = new Date()) {
