@@ -3486,15 +3486,18 @@ function overviewRankRow(row, index, side) {
 function sectorOverviewFlow(rows) {
   if (state.loading.has("sectorFlow") && !rows.length) return `<div class="card-loading">加载中...</div>`;
   if (!rows.length) return emptyState("暂无资金流数据");
-  const leaders = rows.filter((row) => row.latest > 0).slice(0, 6);
+  const positive = rows.filter((row) => row.latest > 0).sort((a, b) => b.latest - a.latest).slice(0, 3);
+  const negative = rows.filter((row) => row.latest < 0).sort((a, b) => a.latest - b.latest).slice(0, 3);
+  const fallback = rows.filter((row) => !positive.includes(row) && !negative.includes(row)).slice(0, 6 - positive.length - negative.length);
+  const legendRows = [...positive, ...negative, ...fallback].slice(0, 6);
   return `
     <div class="overview-flow-chart">${sectorOverviewFlowSvg(rows.slice(0, 12))}</div>
     <div class="overview-flow-list">
-      ${leaders.map((row) => `
+      ${legendRows.map((row) => `
         <span>
           <i style="background:${escapeAttr(row.color || "#d94f4f")}"></i>
           <b>${escapeHtml(row.name)}</b>
-          <strong>${formatSignedFixed(row.latest, 2)}</strong>
+          <strong class="${trendClass(row.latest)}">${formatSignedFixed(row.latest, 2)}</strong>
         </span>
       `).join("")}
     </div>
@@ -3508,21 +3511,45 @@ function sectorOverviewFlowSvg(rows) {
   const right = 12;
   const top = 12;
   const bottom = 24;
-  const values = rows.flatMap((row) => row.data || []).filter((value) => value != null).map(Number);
+  const plottedRows = rows.map((row) => ({
+    ...row,
+    points: (row.data || [])
+      .map((value, index) => ({ value: numberOrNull(value), index }))
+      .filter((point) => point.value != null)
+  }));
+  const plottedLatestIndex = Math.max(1, ...plottedRows.flatMap((row) => row.points.map((point) => point.index)));
+  const reportedLatestIndex = numberOrNull(state.sectorFlow.data?.last_session_min);
+  const latestIndex = Math.max(1, Math.min(239, reportedLatestIndex == null ? plottedLatestIndex : Math.min(reportedLatestIndex, plottedLatestIndex)));
+  const values = plottedRows.flatMap((row) => row.points.filter((point) => point.index <= latestIndex).map((point) => point.value));
   const min = Math.min(0, ...values);
   const max = Math.max(0, ...values);
-  const xFor = (index) => left + (index / 239) * (width - left - right);
+  const xFor = (index) => left + (index / latestIndex) * (width - left - right);
   const yFor = (value) => top + ((max - value) / Math.max(1, max - min)) * (height - top - bottom);
+  const middleIndex = Math.round(latestIndex / 2);
   return `
     <svg viewBox="0 0 ${width} ${height}" aria-hidden="true">
       <rect x="0" y="0" width="${width}" height="${height}" rx="10" />
       <line x1="${left}" y1="${yFor(0).toFixed(1)}" x2="${width - right}" y2="${yFor(0).toFixed(1)}" />
-      ${rows.map((row) => `<polyline points="${(row.data || []).map((value, index) => `${xFor(index).toFixed(1)},${yFor(Number(value || 0)).toFixed(1)}`).join(" ")}" stroke="${escapeAttr(row.color || "#d94f4f")}" />`).join("")}
+      ${plottedRows.map((row) => {
+        const points = row.points
+          .filter((point) => point.index <= latestIndex)
+          .map((point) => `${xFor(point.index).toFixed(1)},${yFor(point.value).toFixed(1)}`)
+          .join(" ");
+        return points ? `<polyline points="${points}" stroke="${escapeAttr(row.color || "#d94f4f")}" />` : "";
+      }).join("")}
       <text x="${left}" y="${height - 6}">09:30</text>
-      <text x="${width / 2 - 16}" y="${height - 6}">11:30</text>
-      <text x="${width - 48}" y="${height - 6}">15:00</text>
+      ${latestIndex > 36 ? `<text x="${width / 2 - 16}" y="${height - 6}">${escapeHtml(sectorMinuteLabel(middleIndex))}</text>` : ""}
+      <text x="${width - 48}" y="${height - 6}">${escapeHtml(sectorMinuteLabel(latestIndex))}</text>
     </svg>
   `;
+}
+
+function sectorMinuteLabel(index) {
+  const safeIndex = Math.max(0, Math.min(239, Number(index) || 0));
+  const minutes = safeIndex < 120 ? 9 * 60 + 30 + safeIndex : 13 * 60 + safeIndex - 120;
+  const hour = Math.floor(minutes / 60);
+  const minute = minutes % 60;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 }
 
 function sectorFlowTemplate() {

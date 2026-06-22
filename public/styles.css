@@ -2376,6 +2376,14 @@ textarea {
   color: var(--up);
 }
 
+.overview-flow-list strong.down {
+  color: var(--down);
+}
+
+.overview-flow-list strong.flat {
+  color: var(--muted);
+}
+
 .card-loading {
   color: var(--muted);
   font-weight: 750;
