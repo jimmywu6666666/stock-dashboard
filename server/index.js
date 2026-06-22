@@ -38,6 +38,7 @@ const SMTP_FROM = clean(process.env.REPORT_EMAIL_FROM || SMTP_USER || "");
 const execFileAsync = promisify(execFile);
 const SECTOR_CATALOG_LIMIT = Number(process.env.SECTOR_CATALOG_LIMIT || 120);
 const SECTOR_FLOW_LIMIT = Number(process.env.SECTOR_FLOW_LIMIT || 32);
+const SECTOR_RANKING_LIMIT = Number(process.env.SECTOR_RANKING_LIMIT || 30);
 const SECTOR_FEATURED_NAMES = [
   "光模块", "光通信", "CPO", "光纤", "PCB", "先进封装", "半导体", "AI芯片", "算力",
   "液冷", "人工智能", "机器人", "消费电子", "存储芯片", "通信服务", "商业航天",
@@ -1815,10 +1816,24 @@ async function loadSectorRanking(dateInput = "latest") {
   });
   const validRows = rows.filter(Boolean);
   if (!validRows.length) return loadSignanaSectorRanking(targetDate).catch(() => loadSectorRealtimeRanking(targetDate));
+  const sortedRows = validRows.sort((a, b) => (numberOrNull(b.pct_1d) ?? -Infinity) - (numberOrNull(a.pct_1d) ?? -Infinity));
+  if (targetDate === dates[0] && sortedRows.length < SECTOR_RANKING_LIMIT) {
+    const realtime = await loadSectorRealtimeRanking(targetDate).catch(() => null);
+    const mergedRows = uniqueBy([...sortedRows, ...(realtime?.rows || [])], (row) => row.code)
+      .sort((a, b) => (numberOrNull(b.pct_1d) ?? -Infinity) - (numberOrNull(a.pct_1d) ?? -Infinity))
+      .slice(0, SECTOR_RANKING_LIMIT);
+    if (mergedRows.length) {
+      return {
+        date: targetDate,
+        updated_at: chinaTimeLabel(),
+        rows: mergedRows
+      };
+    }
+  }
   return {
     date: targetDate,
     updated_at: chinaTimeLabel(),
-    rows: validRows.sort((a, b) => (numberOrNull(b.pct_1d) ?? -Infinity) - (numberOrNull(a.pct_1d) ?? -Infinity))
+    rows: sortedRows.slice(0, SECTOR_RANKING_LIMIT)
   };
 }
 
@@ -1844,7 +1859,7 @@ async function loadSignanaSectorRanking(dateInput = "latest") {
     date: clean(raw.date || date),
     updated_at: clean(raw.updated_at || chinaTimeLabel()),
     source: "完整板块涨跌幅",
-    rows: rows.map(normalizeSectorRankingRow).filter(Boolean)
+    rows: rows.map(normalizeSectorRankingRow).filter(Boolean).slice(0, SECTOR_RANKING_LIMIT)
   };
 }
 
@@ -1903,7 +1918,7 @@ async function loadSectorRealtimeRanking(targetDate) {
   return {
     date: targetDate,
     updated_at: chinaTimeLabel(),
-    rows: rows.sort((a, b) => (numberOrNull(b.pct_1d) ?? -Infinity) - (numberOrNull(a.pct_1d) ?? -Infinity))
+    rows: rows.sort((a, b) => (numberOrNull(b.pct_1d) ?? -Infinity) - (numberOrNull(a.pct_1d) ?? -Infinity)).slice(0, SECTOR_RANKING_LIMIT)
   };
 }
 
