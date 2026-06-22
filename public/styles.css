@@ -2391,7 +2391,7 @@ textarea {
 
 .sector-flow-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 176px;
+  grid-template-columns: minmax(0, 1fr) 206px;
   gap: 12px;
   align-items: stretch;
   border: 1px solid var(--line);
@@ -2438,54 +2438,70 @@ textarea {
 }
 
 .sector-flow-picker {
-  display: flex;
+  display: grid;
   align-self: stretch;
   min-height: 0;
-  flex-direction: column;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
   border-left: 1px solid var(--line);
 }
 
-.sector-flow-picker > div:first-child {
-  display: flex;
-  gap: 4px;
-  padding: 0 0 6px 8px;
+.sector-flow-picker-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-bottom: 1px solid var(--line);
 }
 
 .sector-flow-picker button {
-  padding: 4px 8px;
-  font-size: 12px;
-  line-height: 1.2;
+  min-height: 34px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.sector-flow-picker button:hover {
+  background: #f3f7f9;
+  color: var(--teal);
 }
 
 .sector-flow-checks {
   display: grid;
-  flex: 1;
-  gap: 2px;
+  align-content: start;
+  gap: 5px;
   max-height: min(620px, calc(100vh - 300px));
   overflow: auto;
-  padding-left: 8px;
+  padding: 10px 8px;
 }
 
 .sector-flow-checks label {
   display: grid;
-  grid-template-columns: 14px 8px minmax(0, 1fr);
+  grid-template-columns: 18px 10px minmax(0, 1fr);
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  min-height: 32px;
+  border-radius: 6px;
   color: var(--ink);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.25;
-  min-height: 25px;
+  padding: 0 6px;
+}
+
+.sector-flow-checks label.active {
+  background: #f5f8fb;
 }
 
 .sector-flow-checks input {
-  width: 13px;
-  height: 13px;
+  width: 15px;
+  height: 15px;
   margin: 0;
 }
 
 .sector-flow-checks i {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
 }
 
@@ -2493,6 +2509,18 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sector-flow-picker-meta {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: flex-end;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 750;
+  padding: 0 10px;
 }
 
 .sector-replay {
@@ -5097,13 +5125,18 @@ textarea {
     padding-top: 10px;
   }
 
-  .sector-flow-picker > div:first-child,
+  .sector-flow-picker-actions,
   .sector-flow-checks {
     padding-left: 0;
   }
 
+  .sector-flow-picker-actions {
+    border-bottom: 1px solid var(--line);
+  }
+
   .sector-flow-checks {
     max-height: 300px;
+    padding: 10px 0;
   }
 
   .sector-flow-svg {

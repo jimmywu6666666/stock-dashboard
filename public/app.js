@@ -3570,7 +3570,7 @@ function sectorFlowTemplate() {
           ${sectorFlowSvg(data)}
           ${sectorReplayControls(data)}
         </div>
-        ${sectorFlowPicker(data.series || [])}
+        ${sectorFlowPicker(data.series || [], data)}
       </div>
     ` : emptyState("暂无板块流向数据")}
   `;
@@ -3632,23 +3632,26 @@ function sectorFlowSvg(data) {
   `;
 }
 
-function sectorFlowPicker(series) {
+function sectorFlowPicker(series, data = null) {
   return `
     <aside class="sector-flow-picker">
-      <div>
+      <div class="sector-flow-picker-actions">
         <button type="button" data-sector-flow-preset="all">全选</button>
         <button type="button" data-sector-flow-preset="featured">精选</button>
         <button type="button" data-sector-flow-preset="clear">清空</button>
       </div>
       <div class="sector-flow-checks">
         ${series.map((item) => `
-          <label>
+          <label class="${state.sectorFlowSelected.has(item.code) ? "active" : ""}">
             <input type="checkbox" data-sector-flow-code="${escapeAttr(item.code)}" ${state.sectorFlowSelected.has(item.code) ? "checked" : ""} />
             <i style="background:${escapeAttr(item.color || "#999")}"></i>
             <span>${escapeHtml(item.name)}</span>
           </label>
         `).join("")}
       </div>
+      <footer class="sector-flow-picker-meta">
+        <span>${escapeHtml(series.length)} 板块${sectorFlowIsRealtime(data) ? " · 实时(60s)" : ""}</span>
+      </footer>
     </aside>
   `;
 }
