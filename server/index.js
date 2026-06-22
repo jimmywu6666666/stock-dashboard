@@ -2070,8 +2070,11 @@ function buildSectorFlowSeries(sector, minutes) {
   for (const row of minutes) {
     if (row.minuteIndex >= 0 && row.minuteIndex < data.length) data[row.minuteIndex] = numberOrNull(row.mainFlow);
   }
-  let last = data.find((value) => value != null) ?? 0;
-  for (let index = 0; index < data.length; index += 1) {
+  const firstIndex = data.findIndex((value) => value != null);
+  const lastIndex = data.findLastIndex((value) => value != null);
+  if (firstIndex < 0 || lastIndex < 0) return null;
+  let last = data[firstIndex];
+  for (let index = firstIndex; index <= lastIndex; index += 1) {
     if (data[index] == null) data[index] = last;
     else last = data[index];
   }

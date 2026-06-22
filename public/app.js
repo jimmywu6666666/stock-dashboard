@@ -3584,9 +3584,14 @@ function sectorFlowSvg(data) {
   const yFor = (value) => top + ((maxValue - value) / Math.max(1, maxValue - minValue)) * chartHeight;
   const gridValues = uniqueNumbers([Math.round(maxValue), Math.round((maxValue + minValue) / 2), Math.round(minValue)]);
   const paths = visibleSeries.map((item) => {
-    const points = item.data.map((value, index) => `${xFor(index).toFixed(1)},${yFor(Number(value)).toFixed(1)}`).join(" ");
-    const lastValue = item.data.at(-1);
-    const lastX = xFor(Math.max(0, item.data.length - 1));
+    const plotted = item.data
+      .map((value, index) => ({ value: numberOrNull(value), index }))
+      .filter((point) => point.value != null);
+    if (!plotted.length) return "";
+    const points = plotted.map((point) => `${xFor(point.index).toFixed(1)},${yFor(point.value).toFixed(1)}`).join(" ");
+    const lastPoint = plotted.at(-1);
+    const lastValue = lastPoint.value;
+    const lastX = xFor(lastPoint.index);
     const lastY = yFor(Number(lastValue || 0));
     return `
       <polyline class="sector-flow-line" points="${points}" stroke="${escapeAttr(item.color || "#d94f4f")}" />
