@@ -1968,7 +1968,9 @@ async function loadSectorFlowDates() {
   const cachedDates = db.prepare("SELECT DISTINCT tradeDate FROM sector_flow_minutes ORDER BY tradeDate DESC LIMIT 20").all().map((row) => row.tradeDate);
   const latestFlowDate = await loadLatestSectorFlowDate().catch(() => "");
   const rankingDates = await loadSectorRankingDates().catch(() => []);
-  return uniqueBy([...cachedDates, latestFlowDate, rankingDates[0]].filter(Boolean).map((date) => ({ date })), (row) => row.date).map((row) => row.date);
+  return uniqueBy([latestFlowDate, rankingDates[0], ...cachedDates].filter(Boolean).map((date) => ({ date })), (row) => row.date)
+    .map((row) => row.date)
+    .sort((a, b) => b.localeCompare(a));
 }
 
 async function loadLatestSectorFlowDate() {
