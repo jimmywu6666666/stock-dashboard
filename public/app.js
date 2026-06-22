@@ -1745,6 +1745,7 @@ function render() {
   restoreDsaHistoryScroll();
   restoreStockDetailScroll();
   restorePageScroll();
+  syncSectorFlowPickerHeight();
 }
 
 function captureFocusedSearchInput() {
@@ -3562,7 +3563,7 @@ function sectorFlowTemplate() {
     ${state.loading.has("sectorFlow") && !data ? `<div class="chart-empty">图表加载中...</div>` : ""}
     ${data ? `
       <div class="sector-flow-layout">
-        <div>
+        <div class="sector-flow-chart-panel">
           <header class="sector-flow-title">
             <strong>${escapeHtml(data.trade_date || "")} 收盘</strong>
             <span>${escapeHtml(data.title || "资金分时流向")}</span>
@@ -3574,6 +3575,18 @@ function sectorFlowTemplate() {
       </div>
     ` : emptyState("暂无板块流向数据")}
   `;
+}
+
+function syncSectorFlowPickerHeight() {
+  const chartPanel = document.querySelector(".sector-flow-chart-panel");
+  const picker = document.querySelector(".sector-flow-picker");
+  if (!chartPanel || !picker) return;
+  picker.style.height = "";
+  if (window.matchMedia("(max-width: 760px)").matches) return;
+  requestAnimationFrame(() => {
+    const height = Math.round(chartPanel.getBoundingClientRect().height);
+    if (height > 0) picker.style.height = `${height}px`;
+  });
 }
 
 function sectorFlowIsRealtime(data) {
@@ -4669,6 +4682,7 @@ loadDevConfig().finally(() => {
 });
 checkAppVersion(true);
 registerServiceWorker();
+window.addEventListener("resize", syncSectorFlowPickerHeight, { passive: true });
 api("/api/market/overview").then((result) => {
   state.market = result;
   state.authed = true;
