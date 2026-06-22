@@ -3543,9 +3543,26 @@ function holdingMetrics(item, quote = {}) {
   const position = numberOrNull(item.position);
   const hasPosition = position != null && position > 0;
   const marketValue = price != null && hasPosition ? price * position : null;
-  const todayProfit = change != null && hasPosition ? change * position : null;
+  const previousClose = price != null && change != null ? price - change : null;
+  const useCostForToday = price != null
+    && previousClose != null
+    && costPrice != null
+    && costPrice > 0
+    && costPrice >= Math.min(price, previousClose)
+    && costPrice <= Math.max(price, previousClose);
+  const todayProfit = price != null && hasPosition
+    ? useCostForToday
+      ? (price - costPrice) * position
+      : change != null
+        ? change * position
+        : null
+    : null;
   const previousValue = marketValue != null && todayProfit != null ? marketValue - todayProfit : null;
-  const todayProfitPercent = previousValue && previousValue !== 0 ? (todayProfit / previousValue) * 100 : changePercent;
+  const todayProfitPercent = useCostForToday
+    ? ((price - costPrice) / costPrice) * 100
+    : previousValue && previousValue !== 0
+      ? (todayProfit / previousValue) * 100
+      : changePercent;
   const totalProfit = price != null && costPrice != null && hasPosition ? (price - costPrice) * position : null;
   const totalCost = costPrice != null && hasPosition ? costPrice * position : null;
   const totalProfitPercent = totalProfit != null && totalCost ? (totalProfit / totalCost) * 100 : null;
