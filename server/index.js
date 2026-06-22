@@ -129,6 +129,15 @@ db.exec(`
     FOREIGN KEY(userId) REFERENCES users(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS user_preferences (
+    userId INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL DEFAULT '{}',
+    updatedAt TEXT NOT NULL,
+    PRIMARY KEY(userId, key),
+    FOREIGN KEY(userId) REFERENCES users(id) ON DELETE CASCADE
+  );
+
   CREATE TABLE IF NOT EXISTS sector_catalog (
     code TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -3592,6 +3601,46 @@ function targetUserIdForRequest(user, url, body = {}) {
   return Number(target.id);
 }
 
+function normalizeSectorFlowPreference(value = {}) {
+  const selectedCodes = Array.isArray(value.selectedCodes)
+    ? [...new Set(value.selectedCodes
+      .map((code) => clean(code).toUpperCase())
+      .filter((code) => /^BK\d{4}$/.test(code)))]
+    : [];
+  return { selectedCodes };
+}
+
+function readUserPreference(userId, key) {
+  const row = db.prepare("SELECT value, updatedAt FROM user_preferences WHERE userId = ? AND key = ?").get(userId, key);
+  if (!row) return { exists: false, value: null, updatedAt: "" };
+  try {
+    return { exists: true, value: JSON.parse(row.value || "{}"), updatedAt: row.updatedAt || "" };
+  } catch {
+    return { exists: true, value: {}, updatedAt: row.updatedAt || "" };
+  }
+}
+
+function publicSectorFlowPreference(userId) {
+  const preference = readUserPreference(userId, "sector-flow");
+  return {
+    exists: preference.exists,
+    ...normalizeSectorFlowPreference(preference.value || {})
+  };
+}
+
+function saveSectorFlowPreference(userId, body = {}) {
+  const value = normalizeSectorFlowPreference(body);
+  const now = nowIso();
+  db.prepare(`
+    INSERT INTO user_preferences (userId, key, value, updatedAt)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(userId, key) DO UPDATE SET
+      value = excluded.value,
+      updatedAt = excluded.updatedAt
+  `).run(userId, "sector-flow", JSON.stringify(value), now);
+  return value;
+}
+
 function dsaClientUserId(user, url, body = {}) {
   return String(targetUserIdForRequest(user, url, body));
 }
@@ -4129,6 +4178,25 @@ async function handleApi(req, res, url) {
     try {
       const body = await readBody(req);
       return json(res, 200, { data: saveReportSettings(user.id, body), updatedAt: nowIso(), stale: false });
+    } catch (error) {
+      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+    }
+  }
+
+  if (url.pathname === "/api/preferences/sector-flow" && req.method === "GET") {
+    try {
+      const targetUserId = targetUserIdForRequest(user, url);
+      return json(res, 200, { data: publicSectorFlowPreference(targetUserId), userId: targetUserId, updatedAt: nowIso(), stale: false });
+    } catch (error) {
+      return json(res, 403, { message: readableError(error), errorMessage: readableError(error) });
+    }
+  }
+
+  if (url.pathname === "/api/preferences/sector-flow" && req.method === "PATCH") {
+    try {
+      const body = await readBody(req);
+      const targetUserId = targetUserIdForRequest(user, url, body);
+      return json(res, 200, { data: { exists: true, ...saveSectorFlowPreference(targetUserId, body) }, userId: targetUserId, updatedAt: nowIso(), stale: false });
     } catch (error) {
       return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
     }

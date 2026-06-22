@@ -26,6 +26,7 @@ const state = {
   sectorMode: "overview",
   sectorFlowDates: emptyEnvelope({ dates: [] }),
   sectorFlow: emptyEnvelope(null),
+  sectorFlowPreference: emptyEnvelope({ exists: false, selectedCodes: [] }),
   sectorFlowDate: "latest",
   sectorFlowSelected: new Set(),
   sectorFlowPlaying: false,
@@ -1183,6 +1184,9 @@ async function loadSectorDates(options = {}) {
 
 async function loadSectorFlow(options = {}) {
   const date = state.sectorFlowDate || "latest";
+  if (!state.sectorFlowPreference.data?.exists && !state.sectorFlowPreference.updatedAt) {
+    await loadSectorFlowPreference({ silent: true });
+  }
   await loadEnvelopeWithOptions("sectorFlow", `/api/sectors/flow/series?date=${encodeURIComponent(date)}`, options);
   seedSectorFlowSelection();
   const data = state.sectorFlow.data;
@@ -1197,11 +1201,26 @@ async function loadSectorRanking(options = {}) {
 }
 
 async function loadSectors(options = {}) {
-  await loadSectorDates(options);
+  await Promise.all([
+    loadSectorDates(options),
+    loadSectorFlowPreference(options)
+  ]);
   await Promise.all([
     loadSectorFlow(options),
     loadSectorRanking(options)
   ]);
+}
+
+async function loadSectorFlowPreference(options = {}) {
+  if (!options.silent) setLoading("sectorFlowPreference", true);
+  try {
+    state.sectorFlowPreference = await api(preferencePath());
+  } catch (error) {
+    state.sectorFlowPreference = { ...state.sectorFlowPreference, stale: true, errorMessage: error.message };
+  } finally {
+    if (!options.silent) setLoading("sectorFlowPreference", false);
+    else renderAfterAutoRefresh();
+  }
 }
 
 async function loadSectorRankingOnly(options = {}) {
@@ -1218,7 +1237,14 @@ async function ensureSectorFlowLoaded(options = {}) {
 
 function seedSectorFlowSelection() {
   const series = state.sectorFlow.data?.series || [];
-  if (state.sectorFlowSelected.size || !series.length) return;
+  if (!series.length) return;
+  const preference = state.sectorFlowPreference.data || {};
+  if (preference.exists) {
+    const available = new Set(series.map((item) => item.code));
+    state.sectorFlowSelected = new Set((preference.selectedCodes || []).filter((code) => available.has(code)));
+    if (state.sectorFlowSelected.size || (preference.selectedCodes || []).length === 0) return;
+  }
+  if (state.sectorFlowSelected.size) return;
   const ordered = [...series].sort((a, b) => (numberOrNull(a.source_rank) ?? Infinity) - (numberOrNull(b.source_rank) ?? Infinity));
   const featured = ordered.filter((item) => item.featured).slice(0, 10);
   const fallback = ordered.slice(0, 10);
@@ -1248,6 +1274,7 @@ function changeSectorRankingDate(value) {
 function toggleSectorFlowCode(code, checked) {
   if (checked) state.sectorFlowSelected.add(code);
   else state.sectorFlowSelected.delete(code);
+  saveSectorFlowPreference();
   render();
 }
 
@@ -1257,7 +1284,26 @@ function selectSectorFlowPreset(preset) {
   if (preset === "all") state.sectorFlowSelected = new Set(series.map((item) => item.code));
   else if (preset === "clear") state.sectorFlowSelected = new Set();
   else state.sectorFlowSelected = new Set(ordered.filter((item) => item.featured).slice(0, 10).map((item) => item.code));
+  saveSectorFlowPreference();
   render();
+}
+
+async function saveSectorFlowPreference() {
+  const selectedCodes = [...state.sectorFlowSelected];
+  state.sectorFlowPreference = {
+    ...state.sectorFlowPreference,
+    data: { exists: true, selectedCodes }
+  };
+  try {
+    const result = await api(preferencePath(), {
+      method: "PATCH",
+      body: JSON.stringify({ selectedCodes, userId: activeViewUserId() })
+    });
+    state.sectorFlowPreference = result;
+  } catch (error) {
+    console.warn("保存板块流向选择失败", error);
+    state.sectorFlowPreference = { ...state.sectorFlowPreference, stale: true, errorMessage: error.message };
+  }
 }
 
 function toggleSectorReplay() {
@@ -1707,6 +1753,13 @@ function watchlistPath(base = "/api/watchlist") {
   return `${base}${sep}userId=${encodeURIComponent(userId)}`;
 }
 
+function preferencePath(base = "/api/preferences/sector-flow") {
+  const userId = activeViewUserId();
+  if (!state.user?.isAdmin || !userId) return base;
+  const sep = base.includes("?") ? "&" : "?";
+  return `${base}${sep}userId=${encodeURIComponent(userId)}`;
+}
+
 function dsaPath(base) {
   const userId = activeViewUserId();
   if (!state.user?.isAdmin || !userId) return base;
@@ -1728,8 +1781,13 @@ async function switchViewUser(event) {
   state.dsaSelectedRecordId = null;
   state.dsaMessage = "";
   state.dsaHistoryScrollTop = 0;
+  state.sectorFlowSelected = new Set();
+  state.sectorFlowPreference = emptyEnvelope({ exists: false, selectedCodes: [] });
   await loadWatchlist();
+  await loadSectorFlowPreference({ silent: true });
+  if (state.sectorFlow.data) seedSectorFlowSelection();
   if (state.dsaConfig.data?.configured) await loadDsaHistory();
+  render();
 }
 
 function render() {
