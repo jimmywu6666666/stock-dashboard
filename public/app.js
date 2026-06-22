@@ -3671,11 +3671,18 @@ function sectorReplayControls(data) {
 function sectorRankingTemplate() {
   const envelope = state.sectorRanking || emptyEnvelope(null);
   const data = envelope.data;
+  const dates = state.sectorRankingDates.data?.dates || [];
   const rows = sortedSectorRankingRows();
   return `
     <div class="sector-toolbar">
-      <span>${data?.date || state.sectorRankingDate || ""}${data?.updated_at ? ` · ${escapeHtml(data.updated_at)}` : ""}</span>
+      <label>
+        <span>日期</span>
+        <select data-sector-ranking-date>
+          ${(dates.length ? dates : [state.sectorRankingDate || "latest"]).map((date) => `<option value="${escapeAttr(date)}" ${date === state.sectorRankingDate || (!state.sectorRankingDate && date === dates[0]) ? "selected" : ""}>${escapeHtml(date)}</option>`).join("")}
+        </select>
+      </label>
       <button type="button" data-sector-export ${rows.length ? "" : "disabled"}>导出 CSV</button>
+      <span>${data?.date || ""}${data?.updated_at ? ` · ${escapeHtml(data.updated_at)}` : ""}</span>
     </div>
     ${envelope.errorMessage ? `<p class="warning">${escapeHtml(envelope.errorMessage)}</p>` : ""}
     ${state.loading.has("sectorRanking") && !data ? `<div class="chart-empty">表格加载中...</div>` : ""}
