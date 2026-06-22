@@ -1860,11 +1860,59 @@ async function loadSignanaSectorRanking(dateInput = "latest") {
   }));
   const rows = Array.isArray(raw?.rows) ? raw.rows : [];
   if (!rows.length) throw new Error("完整板块涨跌幅为空");
+  const normalizedRows = rows.map((row, index) => normalizeSectorRankingRow(row, index)).filter(Boolean);
+  const mergedRows = await mergePinnedSectorRankingRows(normalizedRows, clean(raw.date || date));
   return {
     date: clean(raw.date || date),
     updated_at: clean(raw.updated_at || chinaTimeLabel()),
     source: "完整板块涨跌幅",
-    rows: rows.map((row, index) => normalizeSectorRankingRow(row, index)).filter(Boolean)
+    rows: mergedRows
+  };
+}
+
+async function mergePinnedSectorRankingRows(rows, targetDate) {
+  const currentRows = Array.isArray(rows) ? rows.filter(Boolean) : [];
+  const existingCodes = new Set(currentRows.map((row) => clean(row.code).toUpperCase()));
+  const missingPinned = SECTOR_PINNED_ROWS.filter((row) => !existingCodes.has(clean(row.code).toUpperCase()));
+  if (!missingPinned.length) return currentRows;
+  const additions = await mapWithConcurrency(missingPinned, 3, async (sector, index) => {
+    const sourceRank = currentRows.length + index;
+    try {
+      const bars = await loadSectorDailyBars(sector.code, 180);
+      return buildSectorRankingRow(sector, bars, targetDate, sourceRank);
+    } catch {
+      return loadSectorRealtimeRankingRow(sector, sourceRank);
+    }
+  });
+  return uniqueBy([...currentRows, ...additions.filter(Boolean)], (row) => row.code)
+    .map((row, index) => ({ ...row, source_rank: numberOrNull(row.source_rank) ?? index + 1 }));
+}
+
+async function loadSectorRealtimeRankingRow(sector, sourceRank = 0) {
+  const code = clean(sector?.code).toUpperCase();
+  if (!/^BK\d{4}$/.test(code)) return null;
+  const raw = await fetchJson(`https://push2delay.eastmoney.com/api/qt/stock/get?fltt=2&invt=2&secid=90.${code}&fields=f43,f57,f58,f170`, {
+    allowCurlFallback: true,
+    headers: { referer: "https://quote.eastmoney.com/" }
+  });
+  const data = raw?.data || {};
+  return {
+    code,
+    name: clean(sector?.name || data.f58 || code),
+    source_rank: sourceRank + 1,
+    close: numberOrNull(data.f43),
+    pct_1d: numberOrNull(data.f170),
+    pct_5d: null,
+    pct_10d: null,
+    pct_20d: null,
+    pct_60d: null,
+    pct_120d: null,
+    vs_ma5_pct: null,
+    vs_ma10_pct: null,
+    vs_ma20_pct: null,
+    sharpe: null,
+    is_partial: 1,
+    trend_30d: []
   };
 }
 
@@ -2041,12 +2089,19 @@ async function loadSectorFlowRankingUniverse(targetDate) {
   });
   const rows = (ranking?.rows || []).filter((row) => /^BK\d{4}$/.test(clean(row.code)));
   if (rows.length) {
-    return rows
+    const existingCodes = new Set(rows.map((row) => clean(row.code).toUpperCase()));
+    const mergedRows = uniqueBy([
+      ...rows,
+      ...SECTOR_PINNED_ROWS
+        .filter((row) => !existingCodes.has(clean(row.code).toUpperCase()))
+        .map((row, index) => ({ ...row, source_rank: rows.length + index + 1, featured: 1 }))
+    ], (row) => clean(row.code).toUpperCase());
+    return mergedRows
       .map((row, index) => ({
         code: clean(row.code).toUpperCase(),
         name: clean(row.name || row.code),
         source_rank: numberOrNull(row.source_rank) ?? index + 1,
-        featured: index < 10
+        featured: Number(row.featured || 0) > 0 || index < 10
       }))
       .sort((a, b) => a.source_rank - b.source_rank);
   }
