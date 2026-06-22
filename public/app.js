@@ -1219,8 +1219,9 @@ async function ensureSectorFlowLoaded(options = {}) {
 function seedSectorFlowSelection() {
   const series = state.sectorFlow.data?.series || [];
   if (state.sectorFlowSelected.size || !series.length) return;
-  const featured = series.filter((item) => item.featured).slice(0, 10);
-  const fallback = series.slice(0, 8);
+  const ordered = [...series].sort((a, b) => (numberOrNull(a.source_rank) ?? Infinity) - (numberOrNull(b.source_rank) ?? Infinity));
+  const featured = ordered.filter((item) => item.featured).slice(0, 10);
+  const fallback = ordered.slice(0, 10);
   state.sectorFlowSelected = new Set((featured.length ? featured : fallback).map((item) => item.code));
 }
 
@@ -1252,9 +1253,10 @@ function toggleSectorFlowCode(code, checked) {
 
 function selectSectorFlowPreset(preset) {
   const series = state.sectorFlow.data?.series || [];
+  const ordered = [...series].sort((a, b) => (numberOrNull(a.source_rank) ?? Infinity) - (numberOrNull(b.source_rank) ?? Infinity));
   if (preset === "all") state.sectorFlowSelected = new Set(series.map((item) => item.code));
   else if (preset === "clear") state.sectorFlowSelected = new Set();
-  else state.sectorFlowSelected = new Set(series.filter((item) => item.featured).slice(0, 12).map((item) => item.code));
+  else state.sectorFlowSelected = new Set(ordered.filter((item) => item.featured).slice(0, 10).map((item) => item.code));
   render();
 }
 
@@ -3435,8 +3437,7 @@ function sectorOverviewTemplate() {
   const rankingRows = [...(state.sectorRanking.data?.rows || [])].sort((a, b) => (numberOrNull(a.source_rank) ?? Infinity) - (numberOrNull(b.source_rank) ?? Infinity));
   const flowRows = (state.sectorFlow.data?.series || [])
     .map((item) => ({ ...item, latest: numberOrNull((item.data || []).at(state.sectorFlow.data?.last_session_min ?? -1) ?? (item.data || []).at(-1)) }))
-    .filter((item) => item.latest != null)
-    .sort((a, b) => Math.abs(b.latest) - Math.abs(a.latest));
+    .sort((a, b) => (numberOrNull(a.source_rank) ?? Infinity) - (numberOrNull(b.source_rank) ?? Infinity));
   return `
     <div class="sector-overview-grid">
       <button type="button" class="sector-overview-card ranking" data-sector-mode="ranking">
@@ -3487,10 +3488,7 @@ function overviewRankRow(row, index, side) {
 function sectorOverviewFlow(rows) {
   if (state.loading.has("sectorFlow") && !rows.length) return `<div class="card-loading">加载中...</div>`;
   if (!rows.length) return emptyState("暂无资金流数据");
-  const positive = rows.filter((row) => row.latest > 0).sort((a, b) => b.latest - a.latest).slice(0, 3);
-  const negative = rows.filter((row) => row.latest < 0).sort((a, b) => a.latest - b.latest).slice(0, 3);
-  const fallback = rows.filter((row) => !positive.includes(row) && !negative.includes(row)).slice(0, 6 - positive.length - negative.length);
-  const legendRows = [...positive, ...negative, ...fallback].slice(0, 6);
+  const legendRows = rows.slice(0, 6);
   return `
     <div class="overview-flow-chart">${sectorOverviewFlowSvg(rows.slice(0, 12))}</div>
     <div class="overview-flow-list">

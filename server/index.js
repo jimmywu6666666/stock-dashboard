@@ -2000,13 +2000,12 @@ async function loadLatestSectorFlowDate() {
 async function loadSectorFlowSeries(dateInput = "latest") {
   const dates = await loadSectorFlowDates();
   const targetDate = normalizeSectorDate(dateInput, dates);
-  const catalog = await loadSectorCatalog();
-  const sectors = sectorFlowUniverse(catalog);
+  const sectors = await loadSectorFlowRankingUniverse(targetDate);
   const rows = await mapWithConcurrency(sectors, 6, async (sector) => {
     const minutes = await loadSectorFlowMinutes(sector.code, targetDate);
     return buildSectorFlowSeries(sector, minutes);
   });
-  const series = rows.filter(Boolean);
+  const series = rows.filter(Boolean).sort((a, b) => (numberOrNull(a.source_rank) ?? Infinity) - (numberOrNull(b.source_rank) ?? Infinity));
   const lastSessionMin = Math.max(0, ...series.flatMap((item) => item.data.map((value, index) => value == null ? -1 : index)));
   return {
     trade_date: targetDate,
@@ -2022,6 +2021,26 @@ async function loadSectorFlowSeries(dateInput = "latest") {
     ],
     series
   };
+}
+
+async function loadSectorFlowRankingUniverse(targetDate) {
+  const ranking = await loadSignanaSectorRanking(targetDate).catch(async () => {
+    const fallback = await loadSectorRanking(targetDate).catch(() => null);
+    return fallback?.rows?.length ? fallback : null;
+  });
+  const rows = (ranking?.rows || []).filter((row) => /^BK\d{4}$/.test(clean(row.code)));
+  if (rows.length) {
+    return rows
+      .map((row, index) => ({
+        code: clean(row.code).toUpperCase(),
+        name: clean(row.name || row.code),
+        source_rank: numberOrNull(row.source_rank) ?? index + 1,
+        featured: index < 10
+      }))
+      .sort((a, b) => a.source_rank - b.source_rank);
+  }
+  const catalog = await loadSectorCatalog();
+  return sectorFlowUniverse(catalog).map((row, index) => ({ ...row, source_rank: index + 1 }));
 }
 
 async function loadSectorFlowMinutes(codeInput, tradeDate) {
@@ -2078,31 +2097,33 @@ function sectorMinuteIndex(timePart) {
 }
 
 function buildSectorFlowSeries(sector, minutes) {
-  if (!minutes.length) return null;
   const data = Array(240).fill(null);
   for (const row of minutes) {
     if (row.minuteIndex >= 0 && row.minuteIndex < data.length) data[row.minuteIndex] = numberOrNull(row.mainFlow);
   }
   const firstIndex = data.findIndex((value) => value != null);
   const lastIndex = data.findLastIndex((value) => value != null);
-  if (firstIndex < 0 || lastIndex < 0) return null;
-  let last = data[firstIndex];
-  for (let index = firstIndex; index <= lastIndex; index += 1) {
-    if (data[index] == null) data[index] = last;
-    else last = data[index];
+  if (firstIndex >= 0 && lastIndex >= 0) {
+    let last = data[firstIndex];
+    for (let index = firstIndex; index <= lastIndex; index += 1) {
+      if (data[index] == null) data[index] = last;
+      else last = data[index];
+    }
   }
   return {
     name: sector.name,
     code: sector.code,
-    color: sectorColor(sector.code),
-    featured: sectorFeaturedScore(sector) < 1000,
+    color: sectorColor(sector.code, sector.source_rank),
+    source_rank: numberOrNull(sector.source_rank),
+    featured: Number(sector.featured || 0) > 0 || sectorFeaturedScore(sector) < 1000,
     data
   };
 }
 
-function sectorColor(code) {
+function sectorColor(code, sourceRank = null) {
   const palette = ["#d94f4f", "#2f80ed", "#27ae60", "#f2994a", "#9b51e0", "#00a6a6", "#eb5757", "#6fcf97", "#f2c94c", "#bb6bd9", "#56ccf2", "#b85c38"];
-  const number = Number(String(code || "").replace(/\D/g, "")) || 0;
+  const rank = numberOrNull(sourceRank);
+  const number = rank == null ? Number(String(code || "").replace(/\D/g, "")) || 0 : Math.max(0, rank - 1);
   return palette[number % palette.length];
 }
 
