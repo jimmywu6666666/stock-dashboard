@@ -58,6 +58,8 @@ const SECTOR_PINNED_ROWS = [
   { code: "BK1184", name: "人形机器人" }
 ];
 const SIGNANA_BASE_URL = cleanBaseUrl(process.env.SIGNANA_BASE_URL || "https://www.signana.com");
+const EASTMONEY_KLINE_FIELDS1 = "f1,f2,f3,f4,f5,f6";
+const EASTMONEY_KLINE_FIELDS2 = "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61";
 
 function cleanBaseUrl(value) {
   return String(value || "").trim().replace(/\/+$/, "");
@@ -1751,7 +1753,7 @@ async function loadSectorDailyBars(codeInput, days = 180) {
   const beginDate = new Date(Date.now() - Math.max(days + 40, 220) * 24 * 60 * 60 * 1000);
   const begin = chinaDateKey(beginDate).replaceAll("-", "");
   try {
-    const raw = await fetchSectorHistoryJson(`/api/qt/stock/kline/get?secid=90.${code}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58&klt=101&fqt=1&beg=${begin}&end=${end}`);
+    const raw = await fetchSectorHistoryJson(sectorDailyKlinePath(code, begin, end));
     const rows = (raw?.data?.klines || []).map((line) => parseSectorDailyBar(code, line)).filter(Boolean);
     if (!rows.length) throw new Error(`${code} 板块日 K 为空`);
     const stmt = db.prepare(`
@@ -1766,17 +1768,50 @@ async function loadSectorDailyBars(codeInput, days = 180) {
   }
 }
 
+function sectorDailyKlinePath(code, begin, end) {
+  return sectorFullscreenKlinePath(code, 101, begin, end);
+}
+
+function sectorFullscreenKlinePath(code, klt, begin, end) {
+  if (clean(code).toUpperCase() === "BK0711") {
+    return eastmoneyFullscreenKlinePath(`90.${code}`, klt, {
+      beg: 0,
+      end: 20500101,
+      fqt: 1,
+      smplmt: 1_000_000,
+      lmt: 1_000_000
+    });
+  }
+  return eastmoneyFullscreenKlinePath(`90.${code}`, klt, { beg: begin, end, fqt: 1 });
+}
+
+function eastmoneyFullscreenKlinePath(secid, klt = 101, options = {}) {
+  const params = new URLSearchParams({
+    secid,
+    ut: "fa5fd1943c7b386f172d6893dbfba10b",
+    fields1: EASTMONEY_KLINE_FIELDS1,
+    fields2: EASTMONEY_KLINE_FIELDS2,
+    klt: String(klt),
+    fqt: String(options.fqt ?? 1),
+    beg: String(options.beg ?? 0),
+    end: String(options.end ?? 20500101)
+  });
+  if (options.smplmt != null) params.set("smplmt", String(options.smplmt));
+  if (options.lmt != null) params.set("lmt", String(options.lmt));
+  return `/api/qt/stock/kline/get?${params.toString()}`;
+}
+
 async function fetchSectorHistoryJson(pathValue) {
-  const hosts = ["push2delay.eastmoney.com", "push2his.eastmoney.com"];
+  const hosts = ["push2his.eastmoney.com", "push2delay.eastmoney.com", "28.push2his.eastmoney.com", "53.push2his.eastmoney.com"];
   let lastError = null;
   for (const host of hosts) {
     try {
       const textValue = await fetchText(`https://${host}${pathValue}`, {
         timeout: 8000,
         allowCurlFallback: true,
-        headers: { referer: "https://quote.eastmoney.com/" }
+        headers: { referer: "https://quote.eastmoney.com/bk/90.BK0711.html" }
       });
-      const raw = JSON.parse(textValue);
+      const raw = parseMaybeJsonp(textValue);
       if (raw?.data?.klines?.length) return raw;
       lastError = new Error(`${host} 板块历史行情为空`);
     } catch (error) {
@@ -1784,6 +1819,19 @@ async function fetchSectorHistoryJson(pathValue) {
     }
   }
   throw lastError || new Error("板块历史行情不可用");
+}
+
+function parseMaybeJsonp(textValue) {
+  const text = String(textValue || "").trim();
+  if (!text) throw new Error("接口返回空内容");
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    const start = text.indexOf("(");
+    const end = text.lastIndexOf(")");
+    if (start >= 0 && end > start) return JSON.parse(text.slice(start + 1, end));
+    throw error;
+  }
 }
 
 function parseSectorDailyBar(code, line) {
