@@ -2145,8 +2145,9 @@ async function loadSectorFlowMinutes(codeInput, tradeDate) {
   const latestCached = cachedRows.at(-1);
   if (latestCached && Date.now() - (Date.parse(latestCached.updatedAt) || 0) < 60 * 1000) return cachedRows;
   try {
-    const raw = JSON.parse(await fetchWithNodeHttps(`https://push2delay.eastmoney.com/api/qt/stock/fflow/kline/get?lmt=360&klt=1&secid=90.${code}&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56`, {
+    const raw = JSON.parse(await fetchText(`https://push2delay.eastmoney.com/api/qt/stock/fflow/kline/get?lmt=360&klt=1&secid=90.${code}&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56`, {
       timeout: 8000,
+      allowCurlFallback: true,
       headers: { referer: "https://quote.eastmoney.com/" }
     }));
     const rows = (raw?.data?.klines || []).map((line) => parseSectorFlowMinute(code, line)).filter((row) => row?.tradeDate === tradeDate);
