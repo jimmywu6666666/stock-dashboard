@@ -3544,18 +3544,24 @@ function holdingMetrics(item, quote = {}) {
   const hasPosition = position != null && position > 0;
   const marketValue = price != null && hasPosition ? price * position : null;
   const previousClose = price != null && change != null ? price - change : null;
-  const useCostForToday = price != null
+  const defaultTodayProfit = change != null && hasPosition ? change * position : null;
+  const costBasedTodayProfit = price != null && costPrice != null && hasPosition ? (price - costPrice) * position : null;
+  const totalProfit = costBasedTodayProfit;
+  const costBetweenPreviousCloseAndPrice = price != null
     && previousClose != null
     && costPrice != null
     && costPrice > 0
     && costPrice >= Math.min(price, previousClose)
     && costPrice <= Math.max(price, previousClose);
+  const costConflictsWithDailyMove = defaultTodayProfit != null
+    && costBasedTodayProfit != null
+    && Math.sign(defaultTodayProfit) !== Math.sign(costBasedTodayProfit)
+    && Math.abs(costBasedTodayProfit) < Math.abs(defaultTodayProfit);
+  const useCostForToday = costBetweenPreviousCloseAndPrice || costConflictsWithDailyMove;
   const todayProfit = price != null && hasPosition
     ? useCostForToday
-      ? (price - costPrice) * position
-      : change != null
-        ? change * position
-        : null
+      ? costBasedTodayProfit
+      : defaultTodayProfit
     : null;
   const previousValue = marketValue != null && todayProfit != null ? marketValue - todayProfit : null;
   const todayProfitPercent = useCostForToday
@@ -3563,7 +3569,6 @@ function holdingMetrics(item, quote = {}) {
     : previousValue && previousValue !== 0
       ? (todayProfit / previousValue) * 100
       : changePercent;
-  const totalProfit = price != null && costPrice != null && hasPosition ? (price - costPrice) * position : null;
   const totalCost = costPrice != null && hasPosition ? costPrice * position : null;
   const totalProfitPercent = totalProfit != null && totalCost ? (totalProfit / totalCost) * 100 : null;
   return {
