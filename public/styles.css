@@ -2662,6 +2662,20 @@ textarea {
   font-weight: 750;
 }
 
+.sector-history-missing,
+.sector-history-note {
+  color: var(--muted);
+  font-weight: 750;
+}
+
+.sector-history-note {
+  display: inline-block;
+  max-width: 112px;
+  white-space: normal;
+  line-height: 1.25;
+  font-size: 12px;
+}
+
 .sector-sparkline {
   width: 112px;
   height: 36px;

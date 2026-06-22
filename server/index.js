@@ -1773,7 +1773,7 @@ function sectorDailyKlinePath(code, begin, end) {
 }
 
 function sectorFullscreenKlinePath(code, klt, begin, end) {
-  if (clean(code).toUpperCase() === "BK0711") {
+  if (isBrokerSectorCode(code)) {
     return eastmoneyFullscreenKlinePath(`90.${code}`, klt, {
       beg: 0,
       end: 20500101,
@@ -1783,6 +1783,10 @@ function sectorFullscreenKlinePath(code, klt, begin, end) {
     });
   }
   return eastmoneyFullscreenKlinePath(`90.${code}`, klt, { beg: begin, end, fqt: 1 });
+}
+
+function isBrokerSectorCode(code) {
+  return clean(code).toUpperCase() === "BK0711";
 }
 
 function eastmoneyFullscreenKlinePath(secid, klt = 101, options = {}) {
@@ -1802,6 +1806,7 @@ function eastmoneyFullscreenKlinePath(secid, klt = 101, options = {}) {
 }
 
 async function fetchSectorHistoryJson(pathValue) {
+  if (pathValue.includes("secid=90.BK0711")) return fetchBrokerSectorHistoryJson();
   const hosts = ["push2his.eastmoney.com", "push2delay.eastmoney.com", "28.push2his.eastmoney.com", "53.push2his.eastmoney.com"];
   let lastError = null;
   for (const host of hosts) {
@@ -1819,6 +1824,92 @@ async function fetchSectorHistoryJson(pathValue) {
     }
   }
   throw lastError || new Error("板块历史行情不可用");
+}
+
+async function fetchBrokerSectorHistoryJson() {
+  const candidates = brokerSectorKlineCandidates();
+  const diagnostics = [];
+  for (const candidate of candidates) {
+    try {
+      const textValue = await fetchText(candidate.url, {
+        timeout: candidate.timeout || 8000,
+        allowCurlFallback: true,
+        headers: {
+          referer: candidate.referer || "https://quote.eastmoney.com/basic/full.html?mcid=90.BK0711&type=r",
+          accept: candidate.accept || "application/javascript,application/json,text/plain,*/*"
+        }
+      });
+      const raw = parseMaybeJsonp(textValue);
+      const klines = raw?.data?.klines || [];
+      diagnostics.push({
+        name: candidate.name,
+        count: klines.length,
+        first: klines[0] || "",
+        last: klines.at(-1) || ""
+      });
+      if (klines.length >= 120) return raw;
+    } catch (error) {
+      diagnostics.push({ name: candidate.name, error: readableError(error) });
+    }
+  }
+  const error = new Error(`BK0711 历史K线暂不可用：${diagnostics.map((item) => `${item.name}=${item.error || `${item.count}根`}`).join("；")}`);
+  error.diagnostics = diagnostics;
+  console.warn("BK0711 kline diagnostics:", JSON.stringify(diagnostics));
+  throw error;
+}
+
+function brokerSectorKlineCandidates() {
+  const baseParams = {
+    secid: "90.BK0711",
+    ut: "fa5fd1943c7b386f172d6893dbfba10b",
+    fields1: EASTMONEY_KLINE_FIELDS1,
+    fields2: EASTMONEY_KLINE_FIELDS2,
+    klt: "101",
+    beg: "0",
+    end: "20500101",
+    smplmt: "1000000",
+    lmt: "1000000"
+  };
+  const hosts = ["push2his.eastmoney.com", "push2delay.eastmoney.com", "28.push2his.eastmoney.com", "53.push2his.eastmoney.com", "87.push2his.eastmoney.com"];
+  const candidates = [];
+  for (const host of hosts) {
+    for (const fqt of ["0", "1"]) {
+      candidates.push({
+        name: `${host} fqt=${fqt}`,
+        url: eastmoneyKlineCandidateUrl(host, { ...baseParams, fqt })
+      });
+    }
+    candidates.push({
+      name: `${host} lastcount`,
+      url: eastmoneyKlineCandidateUrl(host, {
+        secid: "90.BK0711",
+        ut: baseParams.ut,
+        fields1: baseParams.fields1,
+        fields2: baseParams.fields2,
+        klt: "101",
+        fqt: "1",
+        lmt: "260"
+      })
+    });
+    candidates.push({
+      name: `${host} jsonp`,
+      url: eastmoneyKlineCandidateUrl(host, { cb: `jQuery${Date.now()}`, ...baseParams, fqt: "1" })
+    });
+  }
+  candidates.push({
+    name: "mobile quote kline",
+    url: eastmoneyKlineCandidateUrl("push2.eastmoney.com", { ...baseParams, fqt: "1" }),
+    referer: "https://wap.eastmoney.com/"
+  });
+  return candidates;
+}
+
+function eastmoneyKlineCandidateUrl(host, paramsObject) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(paramsObject)) {
+    if (value != null && value !== "") params.set(key, String(value));
+  }
+  return `https://${host}/api/qt/stock/kline/get?${params.toString()}`;
 }
 
 function parseMaybeJsonp(textValue) {
@@ -1929,8 +2020,8 @@ async function mergePinnedSectorRankingRows(rows, targetDate) {
     try {
       const bars = await loadSectorDailyBars(sector.code, 180);
       return buildSectorRankingRow(sector, bars, targetDate, sourceRank);
-    } catch {
-      return loadSectorRealtimeRankingRow(sector, sourceRank);
+    } catch (error) {
+      return loadSectorRealtimeRankingRow(sector, sourceRank, error);
     }
   });
   return uniqueBy([...currentRows, ...additions.filter(Boolean)], (row) => row.code)
@@ -1938,9 +2029,10 @@ async function mergePinnedSectorRankingRows(rows, targetDate) {
     .map((row, index) => ({ ...row, source_rank: index + 1 }));
 }
 
-async function loadSectorRealtimeRankingRow(sector, sourceRank = 0) {
+async function loadSectorRealtimeRankingRow(sector, sourceRank = 0, historyError = null) {
   const code = clean(sector?.code).toUpperCase();
   if (!/^BK\d{4}$/.test(code)) return null;
+  const historyErrorMessage = sectorHistoryErrorMessage(code, historyError);
   const fields = "f12,f14,f2,f3,f109,f160";
   const listRaw = await fetchJson(`https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=500&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=${fields}`, {
     allowCurlFallback: true,
@@ -1964,6 +2056,7 @@ async function loadSectorRealtimeRankingRow(sector, sourceRank = 0) {
       vs_ma20_pct: null,
       sharpe: null,
       is_partial: 1,
+      history_error: historyErrorMessage,
       trend_30d: []
     };
   }
@@ -1988,8 +2081,15 @@ async function loadSectorRealtimeRankingRow(sector, sourceRank = 0) {
     vs_ma20_pct: null,
     sharpe: null,
     is_partial: 1,
+    history_error: historyErrorMessage,
     trend_30d: []
   };
+}
+
+function sectorHistoryErrorMessage(code, error = null) {
+  if (!isBrokerSectorCode(code)) return "";
+  if (!error) return "BK0711 历史K线暂不可用";
+  return readableError(error);
 }
 
 function normalizeSectorRankingRow(row, index = 0) {
@@ -2013,6 +2113,7 @@ function normalizeSectorRankingRow(row, index = 0) {
     vs_ma20_pct: numberOrNull(row.vs_ma20_pct),
     sharpe: numberOrNull(row.sharpe),
     is_partial: Number(row.is_partial || 0),
+    history_error: clean(row.history_error || ""),
     trend_30d: trend
   };
 }
@@ -2043,6 +2144,7 @@ async function loadSectorRealtimeRanking(targetDate) {
       vs_ma20_pct: null,
       sharpe: null,
       is_partial: 1,
+      history_error: sectorHistoryErrorMessage(item.f12),
       trend_30d: numberOrNull(item.f2) == null ? [] : [numberOrNull(item.f2)]
     }))
     .filter((item) => /^BK\d{4}$/.test(item.code) && item.name);
@@ -2077,6 +2179,7 @@ function buildSectorRankingRow(sector, bars, targetDate, sourceRank = 0) {
     return ma ? ((close / ma) - 1) * 100 : null;
   };
   const trend = bars.slice(Math.max(0, index - 29), index + 1).map((row) => numberOrNull(row.close)).filter((value) => value != null);
+  const historyError = isBrokerSectorCode(sector.code) && bars.length < 120 ? `BK0711 历史K线不足：仅 ${bars.length} 根` : "";
   return {
     code: sector.code,
     name: sector.name,
@@ -2093,6 +2196,7 @@ function buildSectorRankingRow(sector, bars, targetDate, sourceRank = 0) {
     vs_ma20_pct: maPct(20),
     sharpe: sectorSharpe(bars.slice(Math.max(0, index - 30), index + 1)),
     is_partial: 0,
+    history_error: historyError,
     trend_30d: trend
   };
 }

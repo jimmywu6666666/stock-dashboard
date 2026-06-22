@@ -3909,8 +3909,8 @@ function sectorRankingTable(rows) {
             <tr>
               <td>${index + 1}</td>
               <td><strong>${escapeHtml(row.name)}</strong><small>${escapeHtml(row.code)}</small></td>
-              ${columns.map((column) => sectorRankingCell(row[column.key], column)).join("")}
-              <td>${sectorSparkline(row.trend_30d, row.pct_1d)}</td>
+              ${columns.map((column) => sectorRankingCell(row, column)).join("")}
+              <td>${sectorSparkline(row.trend_30d, row.pct_1d, row.history_error)}</td>
             </tr>
           `).join("")}
         </tbody>
@@ -3919,8 +3919,14 @@ function sectorRankingTable(rows) {
   `;
 }
 
-function sectorRankingCell(value, column) {
+function sectorRankingCell(row, column) {
+  const value = row?.[column.key];
   const num = numberOrNull(value);
+  const historyError = String(row?.history_error || "").trim();
+  if (historyError && num == null && isSectorHistoryColumn(column.key)) {
+    const text = column.key === "pct_20d" ? "历史K暂不可用" : "--";
+    return `<td class="sector-heat sector-history-missing" title="${escapeAttr(historyError)}">${escapeHtml(text)}</td>`;
+  }
   const cls = trendClass(num);
   const intensity = column.plain || num == null ? 0 : Math.min(0.78, 0.08 + Math.abs(num) / 120);
   const bg = num == null || column.plain ? "" : ` style="--heat:${intensity.toFixed(2)}"`;
@@ -3928,9 +3934,13 @@ function sectorRankingCell(value, column) {
   return `<td class="sector-heat ${cls}"${bg}>${escapeHtml(text)}</td>`;
 }
 
-function sectorSparkline(values) {
+function isSectorHistoryColumn(key) {
+  return ["pct_20d", "pct_60d", "pct_120d", "vs_ma5_pct", "vs_ma10_pct", "vs_ma20_pct", "sharpe"].includes(key);
+}
+
+function sectorSparkline(values, fallbackValue, historyError = "") {
   const rows = (values || []).map(Number).filter(Number.isFinite);
-  if (rows.length < 2) return "";
+  if (rows.length < 2) return historyError ? `<span class="sector-history-note" title="${escapeAttr(historyError)}">历史K暂不可用</span>` : "";
   const width = 112;
   const height = 36;
   const padX = 5;
