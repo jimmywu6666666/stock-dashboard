@@ -3554,16 +3554,9 @@ function sectorMinuteLabel(index) {
 function sectorFlowTemplate() {
   const envelope = state.sectorFlow || emptyEnvelope(null);
   const data = envelope.data;
-  const dates = state.sectorFlowDates.data?.dates || [];
   return `
     <div class="sector-toolbar">
-      <label>
-        <span>日期</span>
-        <select data-sector-flow-date>
-          ${(dates.length ? dates : [state.sectorFlowDate || "latest"]).map((date) => `<option value="${escapeAttr(date)}" ${date === state.sectorFlowDate || (!state.sectorFlowDate && date === dates[0]) ? "selected" : ""}>${escapeHtml(date)}</option>`).join("")}
-        </select>
-      </label>
-      <span>${data?.series?.length || 0} 板块${sectorFlowIsRealtime(data) ? " · 实时(60s)" : ""}</span>
+      <span>${data?.trade_date || state.sectorFlowDate || ""}${data?.series?.length ? ` · ${escapeHtml(data.series.length)} 板块` : ""}${sectorFlowIsRealtime(data) ? " · 实时(60s)" : ""}</span>
     </div>
     ${envelope.errorMessage ? `<p class="warning">${escapeHtml(envelope.errorMessage)}</p>` : ""}
     ${state.loading.has("sectorFlow") && !data ? `<div class="chart-empty">图表加载中...</div>` : ""}
@@ -3678,18 +3671,11 @@ function sectorReplayControls(data) {
 function sectorRankingTemplate() {
   const envelope = state.sectorRanking || emptyEnvelope(null);
   const data = envelope.data;
-  const dates = state.sectorRankingDates.data?.dates || [];
   const rows = sortedSectorRankingRows();
   return `
     <div class="sector-toolbar">
-      <label>
-        <span>日期</span>
-        <select data-sector-ranking-date>
-          ${(dates.length ? dates : [state.sectorRankingDate || "latest"]).map((date) => `<option value="${escapeAttr(date)}" ${date === state.sectorRankingDate || (!state.sectorRankingDate && date === dates[0]) ? "selected" : ""}>${escapeHtml(date)}</option>`).join("")}
-        </select>
-      </label>
+      <span>${data?.date || state.sectorRankingDate || ""}${data?.updated_at ? ` · ${escapeHtml(data.updated_at)}` : ""}</span>
       <button type="button" data-sector-export ${rows.length ? "" : "disabled"}>导出 CSV</button>
-      <span>${data?.date || ""}${data?.updated_at ? ` · ${escapeHtml(data.updated_at)}` : ""}</span>
     </div>
     ${envelope.errorMessage ? `<p class="warning">${escapeHtml(envelope.errorMessage)}</p>` : ""}
     ${state.loading.has("sectorRanking") && !data ? `<div class="chart-empty">表格加载中...</div>` : ""}
