@@ -34,7 +34,7 @@ const state = {
   sectorRankingDates: emptyEnvelope({ dates: [] }),
   sectorRanking: emptyEnvelope(null),
   sectorRankingDate: "latest",
-  sectorRankingSort: { key: "pct_1d", direction: "desc" },
+  sectorRankingSort: { key: "source_rank", direction: "asc" },
   watchlist: [],
   adminUsers: emptyEnvelope([]),
   reportSettings: emptyEnvelope(null),
@@ -1240,6 +1240,7 @@ function changeSectorFlowDate(value) {
 
 function changeSectorRankingDate(value) {
   state.sectorRankingDate = value || "latest";
+  state.sectorRankingSort = { key: "source_rank", direction: "asc" };
   loadSectorRanking();
 }
 
@@ -3431,7 +3432,7 @@ function sectorFeatureTemplate() {
 }
 
 function sectorOverviewTemplate() {
-  const rankingRows = [...(state.sectorRanking.data?.rows || [])].sort((a, b) => (numberOrNull(b.pct_1d) ?? -Infinity) - (numberOrNull(a.pct_1d) ?? -Infinity));
+  const rankingRows = [...(state.sectorRanking.data?.rows || [])].sort((a, b) => (numberOrNull(a.source_rank) ?? Infinity) - (numberOrNull(b.source_rank) ?? Infinity));
   const flowRows = (state.sectorFlow.data?.series || [])
     .map((item) => ({ ...item, latest: numberOrNull((item.data || []).at(state.sectorFlow.data?.last_session_min ?? -1) ?? (item.data || []).at(-1)) }))
     .filter((item) => item.latest != null)

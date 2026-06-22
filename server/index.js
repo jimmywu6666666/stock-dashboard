@@ -1792,29 +1792,39 @@ function parseSectorDailyBar(code, line) {
 
 async function loadSectorRankingDates() {
   try {
+    return await loadSignanaSectorRankingDates();
+  } catch (error) {
+    console.warn("complete sector ranking dates unavailable, falling back to local source:", readableError(error));
+  }
+  try {
     const rows = await loadSectorDailyBars("BK1136", 60);
     return rows.map((row) => row.tradeDate).filter(Boolean).reverse().slice(0, 30);
   } catch (error) {
     sectorHistoryDisabledUntil = Date.now() + 10 * 60 * 1000;
-    console.warn("sector daily history unavailable, falling back to complete ranking source:", readableError(error));
-    return loadSignanaSectorRankingDates().catch(async () => [await loadLatestSectorFlowDate().catch(() => chinaDateKey())]);
+    console.warn("sector daily history unavailable, falling back to latest flow date:", readableError(error));
+    return [await loadLatestSectorFlowDate().catch(() => chinaDateKey())];
   }
 }
 
 async function loadSectorRanking(dateInput = "latest") {
   const dates = await loadSectorRankingDates();
   const targetDate = normalizeSectorDate(dateInput, dates);
+  const signanaRanking = await loadSignanaSectorRanking(targetDate).catch((error) => {
+    console.warn("complete sector ranking unavailable, falling back to local source:", readableError(error));
+    return null;
+  });
+  if (signanaRanking) return signanaRanking;
   if (Date.now() < sectorHistoryDisabledUntil) {
-    return loadSignanaSectorRanking(targetDate).catch(() => loadSectorRealtimeRanking(targetDate));
+    return loadSectorRealtimeRanking(targetDate);
   }
   const catalog = await loadSectorCatalog();
   const selectedCatalog = catalog.slice(0, Math.max(20, Math.min(SECTOR_CATALOG_LIMIT, 160)));
-  const rows = await mapWithConcurrency(selectedCatalog, 8, async (sector) => {
+  const rows = await mapWithConcurrency(selectedCatalog, 8, async (sector, index) => {
     const bars = await loadSectorDailyBars(sector.code, 180);
-    return buildSectorRankingRow(sector, bars, targetDate);
+    return buildSectorRankingRow(sector, bars, targetDate, index);
   });
   const validRows = rows.filter(Boolean);
-  if (!validRows.length) return loadSignanaSectorRanking(targetDate).catch(() => loadSectorRealtimeRanking(targetDate));
+  if (!validRows.length) return loadSectorRealtimeRanking(targetDate);
   return {
     date: targetDate,
     updated_at: chinaTimeLabel(),
@@ -1844,11 +1854,11 @@ async function loadSignanaSectorRanking(dateInput = "latest") {
     date: clean(raw.date || date),
     updated_at: clean(raw.updated_at || chinaTimeLabel()),
     source: "完整板块涨跌幅",
-    rows: rows.map(normalizeSectorRankingRow).filter(Boolean)
+    rows: rows.map((row, index) => normalizeSectorRankingRow(row, index)).filter(Boolean)
   };
 }
 
-function normalizeSectorRankingRow(row) {
+function normalizeSectorRankingRow(row, index = 0) {
   const code = clean(row?.code || "");
   const name = clean(row?.name || code);
   if (!code || !name) return null;
@@ -1856,6 +1866,7 @@ function normalizeSectorRankingRow(row) {
   return {
     code,
     name,
+    source_rank: Number.isFinite(Number(row.source_rank)) ? Number(row.source_rank) : index + 1,
     close: numberOrNull(row.close),
     pct_1d: numberOrNull(row.pct_1d),
     pct_5d: numberOrNull(row.pct_5d),
@@ -1882,9 +1893,10 @@ async function loadSectorRealtimeRanking(targetDate) {
     ...SECTOR_PINNED_ROWS.map((item) => ({ f12: item.code, f14: item.name })),
     ...(raw?.data?.diff || [])
   ], (item) => item.f12)
-    .map((item) => ({
+    .map((item, index) => ({
       code: clean(item.f12 || "").toUpperCase(),
       name: clean(item.f14 || item.f12 || ""),
+      source_rank: index + 1,
       close: numberOrNull(item.f2),
       pct_1d: numberOrNull(item.f3),
       pct_5d: null,
@@ -1914,7 +1926,7 @@ function normalizeSectorDate(dateInput, dates) {
   return value;
 }
 
-function buildSectorRankingRow(sector, bars, targetDate) {
+function buildSectorRankingRow(sector, bars, targetDate, sourceRank = 0) {
   const index = bars.findIndex((row) => row.tradeDate === targetDate);
   if (index < 0) return null;
   const bar = bars[index];
@@ -1934,6 +1946,7 @@ function buildSectorRankingRow(sector, bars, targetDate) {
   return {
     code: sector.code,
     name: sector.name,
+    source_rank: sourceRank + 1,
     close,
     pct_1d: pctFor(1),
     pct_5d: pctFor(5),
