@@ -2393,11 +2393,15 @@ textarea {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 206px;
   gap: 12px;
-  align-items: stretch;
+  align-items: start;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px;
   background: #fbfdfe;
+}
+
+.sector-flow-chart-panel {
+  min-width: 0;
 }
 
 .sector-flow-title {
@@ -2487,7 +2491,7 @@ textarea {
 
 .sector-flow-picker {
   display: grid;
-  align-self: stretch;
+  align-self: start;
   min-height: 0;
   grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
