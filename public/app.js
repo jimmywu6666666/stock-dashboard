@@ -1803,10 +1803,10 @@ function render() {
   restoreFocusedSearchInput(focusedInput);
   restoreWatchPanelScroll();
   restoreDsaHistoryScroll();
-  restoreSectorFlowPickerScroll();
   restoreStockDetailScroll();
   restorePageScroll();
   syncSectorFlowPickerHeight();
+  restoreSectorFlowPickerScroll();
 }
 
 function captureFocusedSearchInput() {
@@ -2225,6 +2225,7 @@ function restoreSectorFlowPickerScroll() {
     const maxTop = Math.max(0, list.scrollHeight - list.clientHeight);
     list.scrollTop = Math.min(targetTop, maxTop);
   };
+  restore();
   requestAnimationFrame(restore);
   setTimeout(restore, 80);
   setTimeout(restore, 220);
@@ -3665,12 +3666,12 @@ function syncSectorFlowPickerHeight() {
   const chartPanel = document.querySelector(".sector-flow-chart-panel");
   const picker = document.querySelector(".sector-flow-picker");
   if (!chartPanel || !picker) return;
-  picker.style.height = "";
-  if (window.matchMedia("(max-width: 760px)").matches) return;
-  requestAnimationFrame(() => {
-    const height = Math.round(chartPanel.getBoundingClientRect().height);
-    if (height > 0) picker.style.height = `${height}px`;
-  });
+  if (window.matchMedia("(max-width: 760px)").matches) {
+    picker.style.height = "";
+    return;
+  }
+  const height = Math.round(chartPanel.getBoundingClientRect().height);
+  if (height > 0) picker.style.height = `${height}px`;
 }
 
 function sectorFlowIsRealtime(data) {
