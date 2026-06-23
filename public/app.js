@@ -63,6 +63,7 @@ const state = {
   pageScrollTop: 0,
   watchPanelScrollTop: 0,
   dsaHistoryScrollTop: 0,
+  sectorFlowPickerScrollTop: 0,
   lockedWatchPanelScrollTop: null,
   lockedPageScrollTop: null,
   lastUserScrollAt: 0,
@@ -1795,12 +1796,14 @@ function render() {
   rememberStockDetailScroll();
   rememberWatchPanelScroll();
   rememberDsaHistoryScroll();
+  rememberSectorFlowPickerScroll();
   rememberPageScroll();
   app.innerHTML = state.authed ? (state.booting ? bootTemplate() : dashboardTemplate()) : loginTemplate();
   bindEvents();
   restoreFocusedSearchInput(focusedInput);
   restoreWatchPanelScroll();
   restoreDsaHistoryScroll();
+  restoreSectorFlowPickerScroll();
   restoreStockDetailScroll();
   restorePageScroll();
   syncSectorFlowPickerHeight();
@@ -2199,6 +2202,25 @@ function restoreDsaHistoryScroll() {
   const targetTop = state.dsaHistoryScrollTop;
   const restore = () => {
     const list = document.querySelector(".dsa-history-list");
+    if (!list) return;
+    const maxTop = Math.max(0, list.scrollHeight - list.clientHeight);
+    list.scrollTop = Math.min(targetTop, maxTop);
+  };
+  requestAnimationFrame(restore);
+  setTimeout(restore, 80);
+  setTimeout(restore, 220);
+}
+
+function rememberSectorFlowPickerScroll() {
+  const list = document.querySelector(".sector-flow-checks");
+  if (list) state.sectorFlowPickerScrollTop = list.scrollTop;
+}
+
+function restoreSectorFlowPickerScroll() {
+  if (!state.sectorFlowPickerScrollTop) return;
+  const targetTop = state.sectorFlowPickerScrollTop;
+  const restore = () => {
+    const list = document.querySelector(".sector-flow-checks");
     if (!list) return;
     const maxTop = Math.max(0, list.scrollHeight - list.clientHeight);
     list.scrollTop = Math.min(targetTop, maxTop);
