@@ -2293,9 +2293,11 @@ async function loadSectorFlowMinutes(codeInput, tradeDate) {
   const code = clean(codeInput).toUpperCase();
   if (!/^BK\d{4}$/.test(code)) throw new Error("板块代码不正确");
   const cachedRows = db.prepare("SELECT * FROM sector_flow_minutes WHERE code = ? AND tradeDate = ? ORDER BY minuteIndex").all(code, tradeDate);
-  if (cachedRows.length && isOutsideAshareTradingSession()) return cachedRows;
+  const cachedComplete = cachedRows.length >= 240 || (numberOrNull(cachedRows.at(-1)?.minuteIndex) ?? -1) >= 239;
+  const outsideSession = isOutsideAshareTradingSession();
+  if (cachedRows.length && outsideSession && cachedComplete) return cachedRows;
   const latestCached = cachedRows.at(-1);
-  if (latestCached && Date.now() - (Date.parse(latestCached.updatedAt) || 0) < 60 * 1000) return cachedRows;
+  if (latestCached && Date.now() - (Date.parse(latestCached.updatedAt) || 0) < 60 * 1000 && (!outsideSession || cachedComplete)) return cachedRows;
   try {
     const raw = JSON.parse(await fetchText(`https://push2delay.eastmoney.com/api/qt/stock/fflow/kline/get?lmt=360&klt=1&secid=90.${code}&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56`, {
       timeout: 8000,
