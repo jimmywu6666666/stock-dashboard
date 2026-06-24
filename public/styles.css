@@ -2636,6 +2636,23 @@ textarea {
   font: inherit;
 }
 
+.sector-name-button {
+  display: grid;
+  justify-items: start;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sector-name-button:hover strong {
+  color: var(--primary);
+}
+
 .sector-ranking-table td strong {
   display: block;
   color: var(--ink);

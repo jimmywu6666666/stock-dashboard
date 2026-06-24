@@ -1136,6 +1136,8 @@ function chooseDsaStock(index) {
 
 async function openSectorDetail(code) {
   const sector = state.mainlines.data.find((item) => item.code === code)
+    || state.sectorRanking.data?.rows?.find((item) => item.code === code)
+    || state.sectorFlow.data?.series?.find((item) => item.code === code)
     || { code, name: code };
   state.sectorDetail = {
     sector,
@@ -2050,6 +2052,7 @@ function bindEvents() {
     render();
   }));
   document.querySelectorAll("[data-mainline-sector]").forEach((el) => el.addEventListener("click", () => openSectorDetail(el.dataset.mainlineSector)));
+  document.querySelectorAll("[data-sector-detail]").forEach((el) => el.addEventListener("click", () => openSectorDetail(el.dataset.sectorDetail)));
   document.querySelectorAll("[data-sector-stock-open]").forEach((el) => el.addEventListener("click", () => openSectorStock(el.dataset.sectorStockOpen)));
   document.querySelectorAll("[data-close-sector-detail]").forEach((el) => el.addEventListener("click", closeSectorDetail));
   document.querySelectorAll("[data-close-stock-detail]").forEach((el) => el.addEventListener("click", closeStockDetail));
@@ -3931,7 +3934,12 @@ function sectorRankingTable(rows) {
           ${rows.map((row, index) => `
             <tr>
               <td>${index + 1}</td>
-              <td><strong>${escapeHtml(row.name)}</strong><small>${escapeHtml(row.code)}</small></td>
+              <td>
+                <button type="button" class="sector-name-button" data-sector-detail="${escapeAttr(row.code)}">
+                  <strong>${escapeHtml(row.name)}</strong>
+                  <small>${escapeHtml(row.code)}</small>
+                </button>
+              </td>
               ${columns.map((column) => sectorRankingCell(row, column)).join("")}
               <td>${sectorSparkline(row.trend_30d, row.pct_1d, row.history_error)}</td>
             </tr>
