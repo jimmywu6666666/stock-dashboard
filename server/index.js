@@ -3796,7 +3796,9 @@ function holdingMetrics(item, quote = {}) {
     && costBasedTodayProfit != null
     && defaultTodayProfit > 0
     && costBasedTodayProfit < 0;
-  const useCostForToday = costBetweenPreviousCloseAndPrice || costSuggestsIntradayLoss;
+  const useCostForToday = defaultTodayProfit != null
+    && defaultTodayProfit > 0
+    && (costBetweenPreviousCloseAndPrice || costSuggestsIntradayLoss);
   const todayProfit = price != null && hasPosition
     ? useCostForToday
       ? costBasedTodayProfit
