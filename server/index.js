@@ -3792,11 +3792,11 @@ function holdingMetrics(item, quote = {}) {
     && costPrice > 0
     && costPrice >= Math.min(price, previousClose)
     && costPrice <= Math.max(price, previousClose);
-  const costConflictsWithDailyMove = defaultTodayProfit != null
+  const costSuggestsIntradayLoss = defaultTodayProfit != null
     && costBasedTodayProfit != null
-    && Math.sign(defaultTodayProfit) !== Math.sign(costBasedTodayProfit)
-    && Math.abs(costBasedTodayProfit) < Math.abs(defaultTodayProfit);
-  const useCostForToday = costBetweenPreviousCloseAndPrice || costConflictsWithDailyMove;
+    && defaultTodayProfit > 0
+    && costBasedTodayProfit < 0;
+  const useCostForToday = costBetweenPreviousCloseAndPrice || costSuggestsIntradayLoss;
   const todayProfit = price != null && hasPosition
     ? useCostForToday
       ? costBasedTodayProfit
