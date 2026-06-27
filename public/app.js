@@ -2637,7 +2637,7 @@ function bigScreenNewsDuration(count) {
 }
 
 function bigScreenWatchPanel() {
-  const summary = watchSummary();
+  const summary = bigScreenWatchSummary();
   const rows = bigScreenWatchRows();
   return `
     <article class="big-screen-card watch">
@@ -2671,6 +2671,31 @@ function bigScreenWatchItem(item, index) {
       </b>
     </li>
   `;
+}
+
+function bigScreenWatchSummary() {
+  const base = watchSummary();
+  let dailyProfit = 0;
+  let previousValue = 0;
+  let hasDailyProfit = false;
+  for (const item of state.watchlist || []) {
+    const daily = bigScreenWatchDailyMetrics(item);
+    const profit = numberOrNull(daily.profit);
+    const price = numberOrNull(item.price);
+    const change = numberOrNull(item.change);
+    const position = numberOrNull(item.position);
+    if (profit == null) continue;
+    hasDailyProfit = true;
+    dailyProfit += profit;
+    if (price != null && change != null && position != null && position > 0) {
+      previousValue += (price - change) * position;
+    }
+  }
+  return {
+    ...base,
+    todayProfit: hasDailyProfit ? dailyProfit : null,
+    todayProfitPercent: hasDailyProfit && previousValue ? dailyProfit / previousValue * 100 : null
+  };
 }
 
 function bigScreenWatchDailyMetrics(item) {
