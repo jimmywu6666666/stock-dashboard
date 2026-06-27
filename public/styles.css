@@ -226,18 +226,6 @@ a {
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-.big-screen.sci {
-  --screen-bg: #070719;
-  --screen-panel: rgba(13, 14, 45, 0.74);
-  --screen-panel-strong: rgba(20, 20, 64, 0.88);
-  --screen-line: rgba(125, 92, 255, 0.34);
-  --screen-glow: rgba(34, 211, 238, 0.38);
-  --screen-cyan: #8b5cf6;
-  --screen-green: #22d3ee;
-  --screen-red: #ff6b8a;
-  --screen-amber: #f59e0b;
-}
-
 .big-screen-bg {
   position: absolute;
   inset: 0;
@@ -248,15 +236,6 @@ a {
     linear-gradient(rgba(103, 232, 249, 0.055) 1px, transparent 1px),
     linear-gradient(90deg, rgba(103, 232, 249, 0.055) 1px, transparent 1px);
   background-size: auto, auto, 52px 52px, 52px 52px;
-}
-
-.big-screen.sci .big-screen-bg {
-  background:
-    radial-gradient(circle at 22% 18%, rgba(139, 92, 246, 0.28), transparent 30%),
-    radial-gradient(circle at 78% 20%, rgba(34, 211, 238, 0.2), transparent 24%),
-    linear-gradient(rgba(139, 92, 246, 0.065) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(34, 211, 238, 0.055) 1px, transparent 1px);
-  background-size: auto, auto, 46px 46px, 46px 46px;
 }
 
 .big-screen::before,
@@ -300,7 +279,9 @@ a {
   border: 1px solid var(--screen-line);
   border-radius: 8px;
   padding: 14px 20px;
-  background: linear-gradient(90deg, rgba(8, 47, 73, 0.68), rgba(4, 9, 20, 0.2), rgba(8, 47, 73, 0.52));
+  background:
+    linear-gradient(90deg, rgba(8, 47, 73, 0.68), rgba(4, 9, 20, 0.2), rgba(8, 47, 73, 0.52)),
+    linear-gradient(180deg, rgba(20, 184, 166, 0.08), transparent);
   box-shadow: 0 0 36px rgba(34, 211, 238, 0.12), inset 0 0 24px rgba(45, 212, 191, 0.08);
 }
 
@@ -356,7 +337,7 @@ a {
   margin: 12px 0;
   border: 1px solid var(--screen-line);
   border-radius: 8px;
-  background: rgba(2, 6, 23, 0.58);
+  background: linear-gradient(90deg, rgba(2, 6, 23, 0.72), rgba(8, 47, 73, 0.34), rgba(2, 6, 23, 0.72));
 }
 
 .big-screen-ticker div {
@@ -437,6 +418,16 @@ a {
   box-shadow: 0 0 24px rgba(8, 145, 178, 0.12), inset 0 0 26px rgba(14, 165, 233, 0.08);
 }
 
+.big-screen-card::after {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  width: 42px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(103, 232, 249, 0.72));
+  content: "";
+}
+
 .big-screen-card::before {
   position: absolute;
   top: 0;
@@ -473,6 +464,13 @@ a {
   display: grid;
   gap: 10px;
   animation: vertical-scroll 26s linear infinite;
+}
+
+.big-screen-card.watch .big-screen-mini-rank,
+.big-screen-card.ranking .big-screen-rank-list,
+.big-screen-card.heat .big-screen-mini-rank {
+  max-height: 100%;
+  overflow: hidden;
 }
 
 .big-screen-scroll-list p,
@@ -764,12 +762,6 @@ a {
   color: #dffcff;
   font-size: 12px;
   font-weight: 900;
-}
-
-.big-screen-controls button.active {
-  border-color: var(--screen-green);
-  background: rgba(20, 184, 166, 0.22);
-  color: #ccfbf1;
 }
 
 .big-screen-empty {

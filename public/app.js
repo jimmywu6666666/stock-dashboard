@@ -64,7 +64,6 @@ const state = {
   watchPanelScrollTop: 0,
   dsaHistoryScrollTop: 0,
   sectorFlowPickerScrollTop: 0,
-  bigScreenTheme: "command",
   bigScreenPaused: false,
   lockedWatchPanelScrollTop: null,
   lockedPageScrollTop: null,
@@ -1938,10 +1937,6 @@ function bindEvents() {
     state.message = "";
     render();
   }));
-  document.querySelectorAll("[data-big-screen-theme]").forEach((el) => el.addEventListener("click", () => {
-    state.bigScreenTheme = el.dataset.bigScreenTheme === "sci" ? "sci" : "command";
-    render();
-  }));
   document.querySelectorAll("[data-big-screen-pause]").forEach((el) => el.addEventListener("click", () => {
     state.bigScreenPaused = !state.bigScreenPaused;
     render();
@@ -2483,14 +2478,13 @@ function bigScreenTemplate() {
       </main>
     `;
   }
-  const theme = state.bigScreenTheme === "sci" ? "sci" : "command";
   const screenClass = state.bigScreenPaused ? "paused" : "running";
   return `
-    <main class="big-screen ${escapeAttr(theme)} ${escapeAttr(screenClass)}">
+    <main class="big-screen ${escapeAttr(screenClass)}">
       <div class="big-screen-bg" aria-hidden="true"></div>
       <header class="big-screen-header">
         <div>
-          <p>Asia/Shanghai · Real-time Market Operations</p>
+          <p>Exchange Command Center · Asia/Shanghai</p>
           <h1>股市信息综合实时大屏</h1>
         </div>
         <section class="big-screen-status">
@@ -2526,8 +2520,6 @@ function bigScreenTemplate() {
         </div>
       </footer>
       <nav class="big-screen-controls" aria-label="大屏控制">
-        <button type="button" class="${theme === "command" ? "active" : ""}" data-big-screen-theme="command">指挥舱</button>
-        <button type="button" class="${theme === "sci" ? "active" : ""}" data-big-screen-theme="sci">科幻舱</button>
         <button type="button" data-big-screen-pause>${state.bigScreenPaused ? "继续滚动" : "暂停滚动"}</button>
         <button type="button" data-big-screen-exit>返回看板</button>
       </nav>
@@ -2569,7 +2561,7 @@ function bigScreenNewsPanel() {
   return `
     <article class="big-screen-card news">
       <header>
-        <span>资讯雷达</span>
+        <span>资讯快讯</span>
         <b>${rows.length} 条</b>
       </header>
       <div class="big-screen-scroll-list">
@@ -2746,8 +2738,8 @@ function bigScreenHeatPanel() {
   return `
     <article class="big-screen-card heat">
       <header>
-        <span>热度扫描</span>
-        <b>东财热股 / 主线</b>
+        <span>热度雷达</span>
+        <b>东财热股 / 市场主线</b>
       </header>
       <div class="big-screen-heat-grid">
         <ol class="big-screen-mini-rank">
