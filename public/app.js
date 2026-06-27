@@ -2558,20 +2558,24 @@ function bigScreenTickerItem(item) {
 
 function bigScreenNewsPanel() {
   const rows = bigScreenNewsRows();
+  const rowHtml = rows.map((item, index) => `
+    <p>
+      <i>${String(index + 1).padStart(2, "0")}</i>
+      <span>${escapeHtml(item.title)}</span>
+      <em>${escapeHtml(item.source)}</em>
+    </p>
+  `).join("");
   return `
     <article class="big-screen-card news">
       <header>
         <span>资讯快讯</span>
         <b>${rows.length} 条</b>
       </header>
-      <div class="big-screen-scroll-list">
-        ${rows.map((item, index) => `
-          <p>
-            <i>${String(index + 1).padStart(2, "0")}</i>
-            <span>${escapeHtml(item.title)}</span>
-            <em>${escapeHtml(item.source)}</em>
-          </p>
-        `).join("") || `<p><span>资讯等待刷新</span></p>`}
+      <div class="big-screen-scroll-viewport">
+        <div class="big-screen-scroll-list">
+          ${rowHtml || `<p><span>资讯等待刷新</span></p>`}
+          ${rowHtml}
+        </div>
       </div>
     </article>
   `;
