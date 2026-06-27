@@ -64,6 +64,8 @@ const state = {
   watchPanelScrollTop: 0,
   dsaHistoryScrollTop: 0,
   sectorFlowPickerScrollTop: 0,
+  bigScreenTheme: "command",
+  bigScreenPaused: false,
   lockedWatchPanelScrollTop: null,
   lockedPageScrollTop: null,
   lastUserScrollAt: 0,
@@ -1800,7 +1802,8 @@ function render() {
   rememberDsaHistoryScroll();
   rememberSectorFlowPickerScroll();
   rememberPageScroll();
-  app.innerHTML = state.authed ? (state.booting ? bootTemplate() : dashboardTemplate()) : loginTemplate();
+  updateBodyMode();
+  app.innerHTML = state.authed ? (state.booting ? bootTemplate() : appTemplate()) : loginTemplate();
   bindEvents();
   restoreFocusedSearchInput(focusedInput);
   restoreWatchPanelScroll();
@@ -1809,6 +1812,22 @@ function render() {
   restorePageScroll();
   syncSectorFlowPickerHeight();
   restoreSectorFlowPickerScroll();
+}
+
+function appTemplate() {
+  return isBigScreenRoute() ? bigScreenTemplate() : dashboardTemplate();
+}
+
+function isBigScreenRoute() {
+  return window.location.pathname === "/screen" || new URLSearchParams(window.location.search).get("screen") === "1";
+}
+
+function isSmallScreenViewport() {
+  return window.matchMedia("(max-width: 900px)").matches;
+}
+
+function updateBodyMode() {
+  document.body.classList.toggle("big-screen-body", Boolean(state.authed && !state.booting && isBigScreenRoute()));
 }
 
 function captureFocusedSearchInput() {
@@ -1918,6 +1937,17 @@ function bindEvents() {
     state.authMode = el.dataset.authMode;
     state.message = "";
     render();
+  }));
+  document.querySelectorAll("[data-big-screen-theme]").forEach((el) => el.addEventListener("click", () => {
+    state.bigScreenTheme = el.dataset.bigScreenTheme === "sci" ? "sci" : "command";
+    render();
+  }));
+  document.querySelectorAll("[data-big-screen-pause]").forEach((el) => el.addEventListener("click", () => {
+    state.bigScreenPaused = !state.bigScreenPaused;
+    render();
+  }));
+  document.querySelectorAll("[data-big-screen-exit]").forEach((el) => el.addEventListener("click", () => {
+    window.location.href = "/";
   }));
   const addForm = document.querySelector("#watch-form");
   if (addForm) addForm.addEventListener("submit", addWatch);
@@ -2438,6 +2468,312 @@ function dashboardTemplate() {
       ${detailTemplate()}
     </div>
   `;
+}
+
+function bigScreenTemplate() {
+  if (isSmallScreenViewport()) {
+    return `
+      <main class="big-screen-mobile-note">
+        <section>
+          <p class="eyebrow">Large Screen Mode</p>
+          <h1>请使用 PC 端查看大屏</h1>
+          <p>实时大屏按宽屏投屏设计，手机端不提供适配版本。</p>
+          <button type="button" data-big-screen-exit>返回普通看板</button>
+        </section>
+      </main>
+    `;
+  }
+  const theme = state.bigScreenTheme === "sci" ? "sci" : "command";
+  const screenClass = state.bigScreenPaused ? "paused" : "running";
+  return `
+    <main class="big-screen ${escapeAttr(theme)} ${escapeAttr(screenClass)}">
+      <div class="big-screen-bg" aria-hidden="true"></div>
+      <header class="big-screen-header">
+        <div>
+          <p>Asia/Shanghai · Real-time Market Operations</p>
+          <h1>股市信息综合实时大屏</h1>
+        </div>
+        <section class="big-screen-status">
+          <span>Live</span>
+          <strong>${escapeHtml(formatTime(new Date().toISOString()))}</strong>
+          <em>${escapeHtml(bigScreenLatestUpdate())}</em>
+        </section>
+      </header>
+      <section class="big-screen-ticker" aria-label="核心行情">
+        <div>
+          ${bigScreenTickerRows().map(bigScreenTickerItem).join("") || `<span>核心行情等待刷新</span>`}
+          ${bigScreenTickerRows().map(bigScreenTickerItem).join("")}
+        </div>
+      </section>
+      <section class="big-screen-grid">
+        <aside class="big-screen-column left">
+          ${bigScreenNewsPanel()}
+          ${bigScreenWatchPanel()}
+        </aside>
+        <section class="big-screen-center">
+          ${bigScreenMarketPanel()}
+          ${bigScreenSectorFlowPanel()}
+        </section>
+        <aside class="big-screen-column right">
+          ${bigScreenRankingPanel()}
+          ${bigScreenHeatPanel()}
+        </aside>
+      </section>
+      <footer class="big-screen-footer">
+        <div class="big-screen-marquee">
+          <span>${bigScreenMarqueeText()}</span>
+          <span>${bigScreenMarqueeText()}</span>
+        </div>
+      </footer>
+      <nav class="big-screen-controls" aria-label="大屏控制">
+        <button type="button" class="${theme === "command" ? "active" : ""}" data-big-screen-theme="command">指挥舱</button>
+        <button type="button" class="${theme === "sci" ? "active" : ""}" data-big-screen-theme="sci">科幻舱</button>
+        <button type="button" data-big-screen-pause>${state.bigScreenPaused ? "继续滚动" : "暂停滚动"}</button>
+        <button type="button" data-big-screen-exit>返回看板</button>
+      </nav>
+    </main>
+  `;
+}
+
+function bigScreenLatestUpdate() {
+  const times = [
+    state.market.updatedAt,
+    state.aShareAnalysis.updatedAt,
+    state.sectorFlow.updatedAt,
+    state.sectorRanking.updatedAt,
+    state.jin10.updatedAt,
+    state.eastmoneyNews.updatedAt,
+    state.hotStocks.updatedAt
+  ].filter(Boolean);
+  if (!times.length) return "等待首轮数据";
+  return `最新同步 ${formatTime(times.sort().at(-1))}`;
+}
+
+function bigScreenTickerRows() {
+  return (state.market.data || []).slice(0, 8);
+}
+
+function bigScreenTickerItem(item) {
+  const trend = trendClass(item.changePercent);
+  return `
+    <span class="${escapeAttr(trend)}">
+      <i>${escapeHtml(item.name)}</i>
+      <b>${escapeHtml(formatNumber(item.price))}</b>
+      <em>${escapeHtml(formatPercent(item.changePercent))}</em>
+    </span>
+  `;
+}
+
+function bigScreenNewsPanel() {
+  const rows = bigScreenNewsRows();
+  return `
+    <article class="big-screen-card news">
+      <header>
+        <span>资讯雷达</span>
+        <b>${rows.length} 条</b>
+      </header>
+      <div class="big-screen-scroll-list">
+        ${rows.map((item, index) => `
+          <p>
+            <i>${String(index + 1).padStart(2, "0")}</i>
+            <span>${escapeHtml(item.title)}</span>
+            <em>${escapeHtml(item.source)}</em>
+          </p>
+        `).join("") || `<p><span>资讯等待刷新</span></p>`}
+      </div>
+    </article>
+  `;
+}
+
+function bigScreenNewsRows() {
+  const jin10Rows = (state.jin10.data || []).slice(0, 8).map((item) => ({ title: item.title, source: "金十" }));
+  const eastRows = (state.eastmoneyNews.data || []).slice(0, 8).map((item) => ({ title: item.title, source: "东财" }));
+  return [...jin10Rows, ...eastRows].filter((item) => item.title);
+}
+
+function bigScreenWatchPanel() {
+  const summary = watchSummary();
+  const rows = bigScreenWatchRows();
+  return `
+    <article class="big-screen-card watch">
+      <header>
+        <span>自选股组合</span>
+        <b>${escapeHtml(summary.positionCount || 0)} 持仓</b>
+      </header>
+      <div class="big-screen-kpi-row">
+        ${bigScreenKpi("总市值", formatMoney(summary.marketValue))}
+        ${bigScreenKpi("今日盈亏", `${formatSignedMoney(summary.todayProfit)} / ${formatPercent(summary.todayProfitPercent)}`, trendClass(summary.todayProfit))}
+        ${bigScreenKpi("总盈亏", `${formatSignedMoney(summary.totalProfit)} / ${formatPercent(summary.totalProfitPercent)}`, trendClass(summary.totalProfit))}
+      </div>
+      <ol class="big-screen-mini-rank">
+        ${rows.map((item, index) => `
+          <li>
+            <i>${index + 1}</i>
+            <span>${escapeHtml(item.name || item.symbol)}<em>${escapeHtml(item.symbol)}</em></span>
+            <b class="${escapeAttr(trendClass(item.todayProfit))}">${escapeHtml(formatSignedMoney(item.todayProfit))}</b>
+          </li>
+        `).join("") || `<li><span>暂无自选股</span></li>`}
+      </ol>
+    </article>
+  `;
+}
+
+function bigScreenWatchRows() {
+  return [...(state.watchlist || [])]
+    .filter((item) => numberOrNull(item.todayProfit) != null)
+    .sort((a, b) => Math.abs(numberOrNull(b.todayProfit) || 0) - Math.abs(numberOrNull(a.todayProfit) || 0))
+    .slice(0, 8);
+}
+
+function bigScreenMarketPanel() {
+  const data = state.aShareAnalysis.data || {};
+  const bins = data.bins || defaultBreadthBins();
+  const maxCount = Math.max(1, ...bins.map((item) => Number(item.count) || 0));
+  return `
+    <article class="big-screen-card market-core">
+      <header>
+        <span>A 股市场温度</span>
+        <b>成交额 ${escapeHtml(formatChineseAmount(data.amount))}</b>
+      </header>
+      <div class="big-screen-breadth">
+        ${bins.map((item) => {
+          const count = Number(item.count) || 0;
+          const height = Math.max(8, Math.round((count / maxCount) * 130));
+          return `
+            <span class="${escapeAttr(item.side)}">
+              <b>${escapeHtml(formatCount(count))}</b>
+              <i style="height:${height}px"></i>
+              <em>${escapeHtml(item.label)}</em>
+            </span>
+          `;
+        }).join("")}
+      </div>
+      <footer>
+        <strong class="up-text">涨 ${escapeHtml(formatCount(data.upCount))} 家</strong>
+        <div style="--up-ratio:${breadthUpRatio(data)}%"><span></span></div>
+        <strong class="down-text">跌 ${escapeHtml(formatCount(data.downCount))} 家</strong>
+      </footer>
+    </article>
+  `;
+}
+
+function bigScreenSectorFlowPanel() {
+  const data = state.sectorFlow.data;
+  return `
+    <article class="big-screen-card sector-flow">
+      <header>
+        <span>板块资金流向</span>
+        <b>${escapeHtml(data?.trade_date || state.sectorFlowDate || "")}</b>
+      </header>
+      ${data ? bigScreenSectorFlowSvg(data) : `<div class="big-screen-empty">资金流向等待刷新</div>`}
+    </article>
+  `;
+}
+
+function bigScreenSectorFlowSvg(data) {
+  const rows = (data.series || [])
+    .map((item) => ({ ...item, latest: lastNonNullNumber(item.data || []) }))
+    .filter((item) => item.latest != null)
+    .sort((a, b) => Math.abs(Number(b.latest || 0)) - Math.abs(Number(a.latest || 0)))
+    .slice(0, 9);
+  if (!rows.length) return `<div class="big-screen-empty">暂无资金流数据</div>`;
+  const width = 780;
+  const height = 310;
+  const left = 44;
+  const right = 104;
+  const top = 18;
+  const bottom = 34;
+  const sessionMinutes = Math.max(1, data.session_minutes || 240);
+  const values = rows.flatMap((row) => (row.data || []).map(numberOrNull)).filter((value) => value != null);
+  const minRaw = Math.min(0, ...values);
+  const maxRaw = Math.max(0, ...values);
+  const pad = Math.max((maxRaw - minRaw) * 0.1, 1);
+  const minValue = minRaw - pad;
+  const maxValue = maxRaw + pad;
+  const xFor = (index) => left + (index / Math.max(1, sessionMinutes - 1)) * (width - left - right);
+  const yFor = (value) => top + ((maxValue - Number(value || 0)) / Math.max(1, maxValue - minValue)) * (height - top - bottom);
+  return `
+    <svg class="big-screen-flow-svg" viewBox="0 0 ${width} ${height}" aria-label="板块资金流向">
+      <rect x="0" y="0" width="${width}" height="${height}" rx="18"></rect>
+      ${[maxValue, 0, minValue].map((value) => `<line x1="${left}" y1="${yFor(value).toFixed(1)}" x2="${width - right}" y2="${yFor(value).toFixed(1)}"></line>`).join("")}
+      ${rows.map((row) => {
+        const points = (row.data || [])
+          .map((value, index) => ({ value: numberOrNull(value), index }))
+          .filter((point) => point.value != null)
+          .map((point) => `${xFor(point.index).toFixed(1)},${yFor(point.value).toFixed(1)}`)
+          .join(" ");
+        const end = lastNonNullNumber(row.data || []);
+        return points ? `<polyline points="${points}" stroke="${escapeAttr(row.color || "#ef4444")}"></polyline><text x="${width - right + 10}" y="${yFor(end).toFixed(1)}">${escapeHtml(row.name)} ${escapeHtml(formatSignedFixed(end, 1))}</text>` : "";
+      }).join("")}
+      <text x="${left}" y="${height - 8}">09:30</text>
+      <text x="${width / 2 - 18}" y="${height - 8}">11:30</text>
+      <text x="${width - right - 4}" y="${height - 8}">15:00</text>
+    </svg>
+  `;
+}
+
+function bigScreenRankingPanel() {
+  const rows = bigScreenRankingRows();
+  return `
+    <article class="big-screen-card ranking">
+      <header>
+        <span>板块涨幅榜</span>
+        <b>${escapeHtml(state.sectorRanking.data?.date || "")}</b>
+      </header>
+      <ol class="big-screen-rank-list">
+        ${rows.map((row, index) => `
+          <li>
+            <i>${index + 1}</i>
+            <span>${escapeHtml(row.name)}<em>${escapeHtml(row.code || "")}</em></span>
+            <b class="${escapeAttr(trendClass(row.pct_1d))}">${escapeHtml(formatPercent(row.pct_1d))}</b>
+          </li>
+        `).join("") || `<li><span>板块涨幅等待刷新</span></li>`}
+      </ol>
+    </article>
+  `;
+}
+
+function bigScreenRankingRows() {
+  return [...(state.sectorRanking.data?.rows || [])]
+    .filter((row) => numberOrNull(row.pct_1d) != null)
+    .sort((a, b) => Number(b.pct_1d) - Number(a.pct_1d))
+    .slice(0, 10);
+}
+
+function bigScreenHeatPanel() {
+  const hotRows = (state.hotStocks.data || []).slice(0, 8);
+  const mainRows = (state.mainlines.data || []).slice(0, 8);
+  return `
+    <article class="big-screen-card heat">
+      <header>
+        <span>热度扫描</span>
+        <b>东财热股 / 主线</b>
+      </header>
+      <div class="big-screen-heat-grid">
+        <ol class="big-screen-mini-rank">
+          ${hotRows.map((item, index) => `
+            <li>
+              <i>${index + 1}</i>
+              <span>${escapeHtml(item.name)}<em>${escapeHtml(item.symbol || "")}</em></span>
+              <b class="${escapeAttr(trendClass(item.changePercent))}">${escapeHtml(formatPercent(item.changePercent))}</b>
+            </li>
+          `).join("") || `<li><span>热股等待刷新</span></li>`}
+        </ol>
+        <div class="big-screen-tags">
+          ${mainRows.map((item) => `<span>${escapeHtml(item.name)} <b>${escapeHtml(formatPercent(item.pct))}</b></span>`).join("") || `<span>主线等待刷新</span>`}
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function bigScreenKpi(label, value, cls = "") {
+  return `<span><i>${escapeHtml(label)}</i><strong class="${escapeAttr(cls)}">${escapeHtml(value)}</strong></span>`;
+}
+
+function bigScreenMarqueeText() {
+  const rows = bigScreenNewsRows().slice(0, 12).map((item) => `${item.source}：${item.title}`);
+  return rows.length ? rows.join("　|　") : "实时资讯等待刷新　|　板块资金流向等待同步　|　核心行情自动刷新";
 }
 
 function adminViewSwitcherTemplate() {
@@ -4932,12 +5268,12 @@ setInterval(() => {
 }, 180_000);
 
 setInterval(() => {
-  if (!state.authed || state.activeTab !== "板块" || state.sectorFlowPlaying) return;
+  if (!state.authed || (!isBigScreenRoute() && state.activeTab !== "板块") || state.sectorFlowPlaying) return;
   loadSectorFlow({ silent: true });
 }, 60_000);
 
 setInterval(() => {
-  if (!state.authed || state.activeTab !== "板块") return;
+  if (!state.authed || (!isBigScreenRoute() && state.activeTab !== "板块")) return;
   loadSectorRanking({ silent: true });
 }, 600_000);
 
