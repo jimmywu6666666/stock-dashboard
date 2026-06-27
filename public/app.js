@@ -84,6 +84,7 @@ const state = {
   defaultUsername: "",
   defaultPassword: "",
   loading: new Set(),
+  authChecking: true,
   booting: false,
   bootTasks: {},
   appVersion: "",
@@ -150,6 +151,7 @@ async function api(path, options = {}) {
   const body = await res.json().catch(() => ({}));
   if (res.status === 401) {
     state.authed = false;
+    state.authChecking = false;
     render();
   }
   if (!res.ok) throw new Error(body.message || body.errorMessage || "请求失败");
@@ -215,6 +217,7 @@ async function login(event) {
     const result = await api("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) });
     state.user = result.user || null;
     state.authed = true;
+    state.authChecking = false;
     startBootscreen();
     state.message = "";
     render();
@@ -239,6 +242,7 @@ async function register(event) {
     const result = await api("/api/auth/register", { method: "POST", body: JSON.stringify(data) });
     state.user = result.user || null;
     state.authed = true;
+    state.authChecking = false;
     startBootscreen();
     state.message = "";
     render();
@@ -294,6 +298,7 @@ function reloadToLatest() {
 async function logout() {
   await api("/api/auth/logout", { method: "POST" }).catch(() => {});
   state.authed = false;
+  state.authChecking = false;
   state.user = null;
   state.booting = false;
   state.bootTasks = {};
@@ -344,8 +349,10 @@ async function loadMe() {
     const result = await api("/api/auth/me");
     state.user = result.data || null;
     if (!state.viewUserId && state.user?.id) state.viewUserId = state.user.id;
+    return Boolean(state.user);
   } catch {
     state.user = null;
+    return false;
   }
 }
 
@@ -1385,7 +1392,7 @@ function csvCell(value) {
 }
 
 async function refreshAll(options = {}) {
-  await loadMe();
+  if (!options.skipMe) await loadMe();
   await loadDsaConfig();
   if (state.booting) {
     await refreshAllWithBootProgress(options);
@@ -1805,7 +1812,7 @@ function render() {
   rememberSectorFlowPickerScroll();
   rememberPageScroll();
   updateBodyMode();
-  app.innerHTML = state.authed ? (state.booting ? bootTemplate() : appTemplate()) : loginTemplate();
+  app.innerHTML = state.authChecking ? bootTemplate() : (state.authed ? (state.booting ? bootTemplate() : appTemplate()) : loginTemplate());
   bindEvents();
   restoreFocusedSearchInput(focusedInput);
   restoreWatchPanelScroll();
@@ -1822,6 +1829,16 @@ function appTemplate() {
 
 function isBigScreenRoute() {
   return window.location.pathname === "/screen" || new URLSearchParams(window.location.search).get("screen") === "1";
+}
+
+function navigateApp(path) {
+  const target = path || "/";
+  if (window.location.pathname !== target || window.location.search) {
+    window.history.pushState({}, "", target);
+  }
+  state.message = "";
+  render();
+  if (isBigScreenRoute()) ensureSectorFlowLoaded({ silent: true });
 }
 
 function isSmallScreenViewport() {
@@ -1944,8 +1961,12 @@ function bindEvents() {
     state.bigScreenPaused = !state.bigScreenPaused;
     render();
   }));
+  document.querySelectorAll("[data-screen-entry]").forEach((el) => el.addEventListener("click", (event) => {
+    event.preventDefault();
+    navigateApp("/screen");
+  }));
   document.querySelectorAll("[data-big-screen-exit]").forEach((el) => el.addEventListener("click", () => {
-    window.location.href = "/";
+    navigateApp("/");
   }));
   const addForm = document.querySelector("#watch-form");
   if (addForm) addForm.addEventListener("submit", addWatch);
@@ -2375,7 +2396,7 @@ function dashboardTemplate() {
         </div>
         <div class="top-actions">
           ${adminViewSwitcherTemplate()}
-          <a class="plain-button compact-button screen-entry-button" href="/screen">大屏模式</a>
+          <a class="plain-button compact-button screen-entry-button" href="/screen" data-screen-entry>大屏模式</a>
           <button class="plain-button compact-button" type="button" data-open-install-guide>快捷入口</button>
           <button class="plain-button compact-button" type="button" data-open-report-settings>收盘日报</button>
           <button class="plain-button compact-button" type="button" data-open-change-password>改密码</button>
@@ -5256,24 +5277,39 @@ function cssEscape(value) {
   return String(value).replace(/["\\]/g, "\\$&");
 }
 
-render();
-loadDevConfig().finally(() => {
-  if (!state.authed) render();
-});
-checkAppVersion(true);
-registerServiceWorker();
-window.addEventListener("resize", syncSectorFlowPickerHeight, { passive: true });
-api("/api/market/overview").then((result) => {
-  state.market = result;
-  state.authed = true;
+async function initializeApp() {
+  render();
+  await loadDevConfig();
+  const hasSession = await loadMe();
+  state.authChecking = false;
+  state.authed = hasSession;
+  if (!hasSession) {
+    render();
+    return;
+  }
   startBootscreen();
   render();
-  refreshAll().finally(() => {
+  try {
+    await refreshAll({ priorityMarket: true, skipMe: true });
+  } finally {
     state.booting = false;
     render();
     ensureSectorFlowLoaded({ silent: true });
-  });
-}).catch(() => render());
+  }
+}
+
+checkAppVersion(true);
+registerServiceWorker();
+window.addEventListener("resize", syncSectorFlowPickerHeight, { passive: true });
+window.addEventListener("popstate", () => {
+  render();
+  if (isBigScreenRoute()) ensureSectorFlowLoaded({ silent: true });
+});
+initializeApp().catch(() => {
+  state.authChecking = false;
+  state.authed = false;
+  render();
+});
 
 setInterval(() => {
   checkAppVersion(false);
