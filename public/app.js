@@ -2534,6 +2534,7 @@ function bigScreenTemplate() {
         <section class="big-screen-center">
           ${bigScreenMarketPanel()}
           ${bigScreenSectorFlowPanel()}
+          ${bigScreenMainlinePanel()}
         </section>
         <aside class="big-screen-column right">
           ${bigScreenRankingPanel()}
@@ -2806,6 +2807,52 @@ function bigScreenSectorFlowSvg(data) {
       <text x="${width - right - 4}" y="${height - 8}">15:00</text>
     </svg>
   `;
+}
+
+function bigScreenMainlinePanel() {
+  const rows = bigScreenMainlineRows();
+  return `
+    <article class="big-screen-card mainline-signal">
+      <header>
+        <span>主线异动</span>
+        <b>概念 / 领涨 / 强度</b>
+      </header>
+      <ol class="big-screen-mainline-list">
+        ${rows.map((item, index) => `
+          <li>
+            <i>${index + 1}</i>
+            <span>
+              ${escapeHtml(item.name || "未知主线")}
+              <em>${escapeHtml(item.leader ? `领涨 ${item.leader}` : "领涨股待更新")}</em>
+            </span>
+            <strong class="${escapeAttr(`${trendClass(item.pct)} ${bigScreenValueChanged(`mainline:${item.code || item.name}:pct`, item.pct)}`)}">${escapeHtml(formatPercent(item.pct))}</strong>
+            <b>${escapeHtml(bigScreenMainlineBreadth(item))}</b>
+          </li>
+        `).join("") || `<li><span>主线异动等待刷新</span></li>`}
+      </ol>
+    </article>
+  `;
+}
+
+function bigScreenMainlineRows() {
+  return [...(state.mainlines.data || [])]
+    .filter((item) => item?.name)
+    .sort((a, b) => (numberOrNull(b.pct) ?? -Infinity) - (numberOrNull(a.pct) ?? -Infinity))
+    .slice(0, 6)
+    .map((item) => ({
+      ...item,
+      leader: item.leadStock
+        ? `${item.leadStock}${item.leadStockCode ? ` · ${item.leadStockCode}` : ""}`
+        : item.leaderName || item.leader || item.leadingStock || item.stockName || item.stock || ""
+    }));
+}
+
+function bigScreenMainlineBreadth(item) {
+  const up = numberOrNull(item.upCount ?? item.riseCount ?? item.up);
+  const down = numberOrNull(item.downCount ?? item.fallCount ?? item.down);
+  if (up != null || down != null) return `涨 ${up ?? "--"} / 跌 ${down ?? "--"}`;
+  const hotMatch = (state.hotStocks.data || []).find((stock) => (stock.tags || []).includes(item.name));
+  return hotMatch ? `热股 ${hotMatch.name}` : "热度跟踪";
 }
 
 function bigScreenRankingPanel() {
