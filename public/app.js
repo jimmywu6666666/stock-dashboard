@@ -2651,26 +2651,48 @@ function bigScreenWatchPanel() {
         ${bigScreenKpi("总盈亏", `${formatSignedMoney(summary.totalProfit)} / ${formatPercent(summary.totalProfitPercent)}`, trendClass(summary.totalProfit))}
       </div>
       <ol class="big-screen-mini-rank">
-        ${rows.map((item, index) => `
-          <li>
-            <i>${index + 1}</i>
-            <span>${escapeHtml(item.name || item.symbol)}<em>${escapeHtml(item.symbol)}</em></span>
-            <b class="${escapeAttr(`big-screen-watch-profit ${trendClass(item.todayProfit)} ${bigScreenValueChanged(`watch:${item.symbol}:today`, item.todayProfit)}`)}">
-              <small>今</small>
-              ${escapeHtml(formatSignedMoney(item.todayProfit))}
-              <em>${escapeHtml(formatPercent(item.todayProfitPercent))}</em>
-            </b>
-          </li>
-        `).join("") || `<li><span>暂无自选股</span></li>`}
+        ${rows.map(bigScreenWatchItem).join("") || `<li><span>暂无自选股</span></li>`}
       </ol>
     </article>
   `;
 }
 
+function bigScreenWatchItem(item, index) {
+  const daily = bigScreenWatchDailyMetrics(item);
+  const changedClass = bigScreenValueChanged(`watch:${item.symbol}:daily`, daily.profit);
+  return `
+    <li>
+      <i>${index + 1}</i>
+      <span>${escapeHtml(item.name || item.symbol)}<em>${escapeHtml(item.symbol)}</em></span>
+      <b class="${escapeAttr(`big-screen-watch-profit ${trendClass(daily.profit)} ${changedClass}`)}">
+        <small>今</small>
+        ${escapeHtml(formatSignedMoney(daily.profit))}
+        <em>${escapeHtml(formatPercent(daily.percent))}</em>
+      </b>
+    </li>
+  `;
+}
+
+function bigScreenWatchDailyMetrics(item) {
+  const change = numberOrNull(item.change);
+  const position = numberOrNull(item.position);
+  const price = numberOrNull(item.price);
+  const profit = change != null && position != null && position > 0
+    ? change * position
+    : numberOrNull(item.todayProfit);
+  const previousValue = price != null && change != null && position != null && position > 0
+    ? (price - change) * position
+    : null;
+  return {
+    profit,
+    percent: numberOrNull(item.changePercent) ?? (profit != null && previousValue ? profit / previousValue * 100 : numberOrNull(item.todayProfitPercent))
+  };
+}
+
 function bigScreenWatchRows() {
   return [...(state.watchlist || [])]
-    .filter((item) => numberOrNull(item.todayProfit) != null)
-    .sort((a, b) => Math.abs(numberOrNull(b.todayProfit) || 0) - Math.abs(numberOrNull(a.todayProfit) || 0))
+    .filter((item) => numberOrNull(bigScreenWatchDailyMetrics(item).profit) != null)
+    .sort((a, b) => (numberOrNull(bigScreenWatchDailyMetrics(b).profit) ?? -Infinity) - (numberOrNull(bigScreenWatchDailyMetrics(a).profit) ?? -Infinity))
     .slice(0, 8);
 }
 
