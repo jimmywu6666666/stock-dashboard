@@ -2655,7 +2655,11 @@ function bigScreenWatchPanel() {
           <li>
             <i>${index + 1}</i>
             <span>${escapeHtml(item.name || item.symbol)}<em>${escapeHtml(item.symbol)}</em></span>
-            <b class="${escapeAttr(`${trendClass(item.todayProfit)} ${bigScreenValueChanged(`watch:${item.symbol}:today`, item.todayProfit)}`)}">${escapeHtml(formatSignedMoney(item.todayProfit))}</b>
+            <b class="${escapeAttr(`big-screen-watch-profit ${trendClass(item.todayProfit)} ${bigScreenValueChanged(`watch:${item.symbol}:today`, item.todayProfit)}`)}">
+              <small>今</small>
+              ${escapeHtml(formatSignedMoney(item.todayProfit))}
+              <em>${escapeHtml(formatPercent(item.todayProfitPercent))}</em>
+            </b>
           </li>
         `).join("") || `<li><span>暂无自选股</span></li>`}
       </ol>
