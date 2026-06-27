@@ -370,12 +370,10 @@ a {
   color: #f8fafc;
   font-size: 22px;
   font-weight: 950;
-  animation: quote-flash 1.15s ease-out;
 }
 
 .big-screen-ticker em {
   display: inline-block;
-  animation: quote-flash 1.15s ease-out;
 }
 
 .big-screen-ticker .up-text i,
@@ -409,6 +407,14 @@ a {
 
 .big-screen .flat {
   color: #cbd5e1 !important;
+}
+
+.big-screen .value-changed,
+.big-screen .value-changed b,
+.big-screen .value-changed em,
+.big-screen .value-changed strong {
+  animation: quote-flash 1.15s ease-out;
+  transform-origin: center;
 }
 
 .big-screen-grid {

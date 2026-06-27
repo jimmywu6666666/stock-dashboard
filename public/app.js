@@ -65,6 +65,9 @@ const state = {
   dsaHistoryScrollTop: 0,
   sectorFlowPickerScrollTop: 0,
   bigScreenPaused: false,
+  bigScreenQuoteCache: new Map(),
+  bigScreenValueCache: new Map(),
+  bigScreenNewsFeed: [],
   lockedWatchPanelScrollTop: null,
   lockedPageScrollTop: null,
   lastUserScrollAt: 0,
@@ -2479,6 +2482,8 @@ function bigScreenTemplate() {
     `;
   }
   const screenClass = state.bigScreenPaused ? "paused" : "running";
+  const tickerHtml = bigScreenTickerRows().map(bigScreenTickerItem).join("");
+  const marqueeText = bigScreenMarqueeText();
   return `
     <main class="big-screen ${escapeAttr(screenClass)}">
       <div class="big-screen-bg" aria-hidden="true"></div>
@@ -2494,9 +2499,9 @@ function bigScreenTemplate() {
         </section>
       </header>
       <section class="big-screen-ticker" aria-label="核心行情">
-        <div>
-          ${bigScreenTickerRows().map(bigScreenTickerItem).join("") || `<span>核心行情等待刷新</span>`}
-          ${bigScreenTickerRows().map(bigScreenTickerItem).join("")}
+        <div style="${bigScreenAnimationDelayStyle(30_000)}">
+          ${tickerHtml || `<span>核心行情等待刷新</span>`}
+          ${tickerHtml}
         </div>
       </section>
       <section class="big-screen-grid">
@@ -2514,9 +2519,9 @@ function bigScreenTemplate() {
         </aside>
       </section>
       <footer class="big-screen-footer">
-        <div class="big-screen-marquee">
-          <span>${bigScreenMarqueeText()}</span>
-          <span>${bigScreenMarqueeText()}</span>
+        <div class="big-screen-marquee" style="${bigScreenAnimationDelayStyle(54_000)}">
+          <span>${marqueeText}</span>
+          <span>${marqueeText}</span>
         </div>
       </footer>
       <nav class="big-screen-controls" aria-label="大屏控制">
@@ -2547,8 +2552,13 @@ function bigScreenTickerRows() {
 
 function bigScreenTickerItem(item) {
   const trend = trendClass(item.changePercent);
+  const key = String(item.symbol || item.name || "");
+  const valueKey = `${formatNumber(item.price)}|${formatPercent(item.changePercent)}`;
+  const previous = state.bigScreenQuoteCache.get(key);
+  const changed = Boolean(previous && previous !== valueKey);
+  if (key) state.bigScreenQuoteCache.set(key, valueKey);
   return `
-    <span class="${escapeAttr(trend)}">
+    <span class="${escapeAttr(`${trend}${changed ? " value-changed" : ""}`)}">
       <i>${escapeHtml(item.name)}</i>
       <b>${escapeHtml(formatNumber(item.price))}</b>
       <em>${escapeHtml(formatPercent(item.changePercent))}</em>
@@ -2557,7 +2567,7 @@ function bigScreenTickerItem(item) {
 }
 
 function bigScreenNewsPanel() {
-  const rows = bigScreenNewsRows();
+  const rows = bigScreenStableNewsRows(bigScreenNewsRows());
   const rowHtml = rows.map((item, index) => `
     <p>
       <i>${String(index + 1).padStart(2, "0")}</i>
@@ -2572,7 +2582,7 @@ function bigScreenNewsPanel() {
         <b>${rows.length} 条</b>
       </header>
       <div class="big-screen-scroll-viewport">
-        <div class="big-screen-scroll-list">
+        <div class="big-screen-scroll-list" style="${bigScreenAnimationDelayStyle(bigScreenNewsDuration(rows.length))}">
           ${rowHtml || `<p><span>资讯等待刷新</span></p>`}
           ${rowHtml}
         </div>
@@ -2585,6 +2595,23 @@ function bigScreenNewsRows() {
   const jin10Rows = (state.jin10.data || []).slice(0, 8).map((item) => ({ title: item.title, source: "金十" }));
   const eastRows = (state.eastmoneyNews.data || []).slice(0, 8).map((item) => ({ title: item.title, source: "东财" }));
   return [...jin10Rows, ...eastRows].filter((item) => item.title);
+}
+
+function bigScreenStableNewsRows(incomingRows) {
+  const incomingMap = new Map(incomingRows.map((item) => [`${item.source}:${item.title}`, item]));
+  if (!state.bigScreenNewsFeed.length) {
+    state.bigScreenNewsFeed = incomingRows.slice(0, 24);
+    return state.bigScreenNewsFeed;
+  }
+  const existingKeys = new Set(state.bigScreenNewsFeed.map((item) => `${item.source}:${item.title}`));
+  const nextRows = incomingRows.filter((item) => !existingKeys.has(`${item.source}:${item.title}`));
+  const activeRows = state.bigScreenNewsFeed.filter((item) => incomingMap.has(`${item.source}:${item.title}`));
+  state.bigScreenNewsFeed = [...activeRows, ...nextRows].slice(-24);
+  return state.bigScreenNewsFeed.length ? state.bigScreenNewsFeed : incomingRows;
+}
+
+function bigScreenNewsDuration(count) {
+  return Math.max(32_000, Math.min(68_000, (Number(count) || 1) * 3200));
 }
 
 function bigScreenWatchPanel() {
@@ -2606,7 +2633,7 @@ function bigScreenWatchPanel() {
           <li>
             <i>${index + 1}</i>
             <span>${escapeHtml(item.name || item.symbol)}<em>${escapeHtml(item.symbol)}</em></span>
-            <b class="${escapeAttr(trendClass(item.todayProfit))}">${escapeHtml(formatSignedMoney(item.todayProfit))}</b>
+            <b class="${escapeAttr(`${trendClass(item.todayProfit)} ${bigScreenValueChanged(`watch:${item.symbol}:today`, item.todayProfit)}`)}">${escapeHtml(formatSignedMoney(item.todayProfit))}</b>
           </li>
         `).join("") || `<li><span>暂无自选股</span></li>`}
       </ol>
@@ -2637,7 +2664,7 @@ function bigScreenMarketPanel() {
           const height = Math.max(8, Math.round((count / maxCount) * 130));
           return `
             <span class="${escapeAttr(item.side)}">
-              <b>${escapeHtml(formatCount(count))}</b>
+              <b class="${escapeAttr(bigScreenValueChanged(`breadth:${item.label}`, count))}">${escapeHtml(formatCount(count))}</b>
               <i style="height:${height}px"></i>
               <em>${escapeHtml(item.label)}</em>
             </span>
@@ -2721,7 +2748,7 @@ function bigScreenRankingPanel() {
           <li>
             <i>${index + 1}</i>
             <span>${escapeHtml(row.name)}<em>${escapeHtml(row.code || "")}</em></span>
-            <b class="${escapeAttr(trendClass(row.pct_1d))}">${escapeHtml(formatPercent(row.pct_1d))}</b>
+            <b class="${escapeAttr(`${trendClass(row.pct_1d)} ${bigScreenValueChanged(`sector:${row.code || row.name}:pct`, row.pct_1d)}`)}">${escapeHtml(formatPercent(row.pct_1d))}</b>
           </li>
         `).join("") || `<li><span>板块涨幅等待刷新</span></li>`}
       </ol>
@@ -2751,7 +2778,7 @@ function bigScreenHeatPanel() {
             <li>
               <i>${index + 1}</i>
               <span>${escapeHtml(item.name)}<em>${escapeHtml(item.symbol || "")}</em></span>
-              <b class="${escapeAttr(trendClass(item.changePercent))}">${escapeHtml(formatPercent(item.changePercent))}</b>
+              <b class="${escapeAttr(`${trendClass(item.changePercent)} ${bigScreenValueChanged(`hot:${item.symbol || item.name}:pct`, item.changePercent)}`)}">${escapeHtml(formatPercent(item.changePercent))}</b>
             </li>
           `).join("") || `<li><span>热股等待刷新</span></li>`}
         </ol>
@@ -2764,12 +2791,27 @@ function bigScreenHeatPanel() {
 }
 
 function bigScreenKpi(label, value, cls = "") {
-  return `<span><i>${escapeHtml(label)}</i><strong class="${escapeAttr(cls)}">${escapeHtml(value)}</strong></span>`;
+  return `<span><i>${escapeHtml(label)}</i><strong class="${escapeAttr(`${cls} ${bigScreenValueChanged(`kpi:${label}`, value)}`)}">${escapeHtml(value)}</strong></span>`;
 }
 
 function bigScreenMarqueeText() {
-  const rows = bigScreenNewsRows().slice(0, 12).map((item) => `${item.source}：${item.title}`);
+  const sourceRows = state.bigScreenNewsFeed.length ? state.bigScreenNewsFeed : bigScreenNewsRows();
+  const rows = sourceRows.slice(0, 12).map((item) => `${item.source}：${item.title}`);
   return rows.length ? rows.join("　|　") : "实时资讯等待刷新　|　板块资金流向等待同步　|　核心行情自动刷新";
+}
+
+function bigScreenAnimationDelayStyle(durationMs) {
+  const duration = Math.max(1000, Number(durationMs) || 1000);
+  const phase = (Date.now() % duration) / 1000;
+  return `animation-duration:${(duration / 1000).toFixed(2)}s;animation-delay:-${phase.toFixed(2)}s`;
+}
+
+function bigScreenValueChanged(key, value) {
+  const normalized = value == null ? "" : String(value);
+  const previous = state.bigScreenValueCache.get(key);
+  const changed = Boolean(previous && previous !== normalized);
+  state.bigScreenValueCache.set(key, normalized);
+  return changed ? "value-changed" : "";
 }
 
 function adminViewSwitcherTemplate() {
