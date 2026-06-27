@@ -2375,6 +2375,7 @@ function dashboardTemplate() {
         </div>
         <div class="top-actions">
           ${adminViewSwitcherTemplate()}
+          <a class="plain-button compact-button screen-entry-button" href="/screen">大屏模式</a>
           <button class="plain-button compact-button" type="button" data-open-install-guide>快捷入口</button>
           <button class="plain-button compact-button" type="button" data-open-report-settings>收盘日报</button>
           <button class="plain-button compact-button" type="button" data-open-change-password>改密码</button>

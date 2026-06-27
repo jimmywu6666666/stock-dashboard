@@ -4827,6 +4827,16 @@ textarea {
   white-space: nowrap;
 }
 
+.screen-entry-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-color: rgba(20, 184, 166, 0.45);
+  background: linear-gradient(135deg, rgba(15, 118, 110, 0.12), rgba(20, 184, 166, 0.06));
+  color: var(--accent);
+  text-decoration: none;
+}
+
 .auth-switch {
   width: 100%;
   margin-top: 12px;
@@ -5193,6 +5203,10 @@ textarea {
     width: auto;
     height: 32px;
     font-size: 17px;
+  }
+
+  .screen-entry-button {
+    display: none;
   }
 
   .view-switcher {
