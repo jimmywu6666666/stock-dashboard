@@ -2659,66 +2659,30 @@ function bigScreenWatchPanel() {
 }
 
 function bigScreenWatchItem(item, index) {
-  const daily = bigScreenWatchDailyMetrics(item);
-  const changedClass = bigScreenValueChanged(`watch:${item.symbol}:daily`, daily.profit);
+  const profit = numberOrNull(item.todayProfit);
+  const percent = numberOrNull(item.todayProfitPercent);
+  const changedClass = bigScreenValueChanged(`watch:${item.symbol}:today`, profit);
   return `
     <li>
       <i>${index + 1}</i>
       <span>${escapeHtml(item.name || item.symbol)}<em>${escapeHtml(item.symbol)}</em></span>
-      <b class="${escapeAttr(`big-screen-watch-profit ${trendClass(daily.profit)} ${changedClass}`)}">
+      <b class="${escapeAttr(`big-screen-watch-profit ${trendClass(profit)} ${changedClass}`)}">
         <small>今</small>
-        ${escapeHtml(formatSignedMoney(daily.profit))}
-        <em>${escapeHtml(formatPercent(daily.percent))}</em>
+        ${escapeHtml(formatSignedMoney(profit))}
+        <em>${escapeHtml(formatPercent(percent))}</em>
       </b>
     </li>
   `;
 }
 
 function bigScreenWatchSummary() {
-  const base = watchSummary();
-  let dailyProfit = 0;
-  let previousValue = 0;
-  let hasDailyProfit = false;
-  for (const item of state.watchlist || []) {
-    const daily = bigScreenWatchDailyMetrics(item);
-    const profit = numberOrNull(daily.profit);
-    const price = numberOrNull(item.price);
-    const change = numberOrNull(item.change);
-    const position = numberOrNull(item.position);
-    if (profit == null) continue;
-    hasDailyProfit = true;
-    dailyProfit += profit;
-    if (price != null && change != null && position != null && position > 0) {
-      previousValue += (price - change) * position;
-    }
-  }
-  return {
-    ...base,
-    todayProfit: hasDailyProfit ? dailyProfit : null,
-    todayProfitPercent: hasDailyProfit && previousValue ? dailyProfit / previousValue * 100 : null
-  };
-}
-
-function bigScreenWatchDailyMetrics(item) {
-  const change = numberOrNull(item.change);
-  const position = numberOrNull(item.position);
-  const price = numberOrNull(item.price);
-  const profit = change != null && position != null && position > 0
-    ? change * position
-    : numberOrNull(item.todayProfit);
-  const previousValue = price != null && change != null && position != null && position > 0
-    ? (price - change) * position
-    : null;
-  return {
-    profit,
-    percent: numberOrNull(item.changePercent) ?? (profit != null && previousValue ? profit / previousValue * 100 : numberOrNull(item.todayProfitPercent))
-  };
+  return watchSummary();
 }
 
 function bigScreenWatchRows() {
   return [...(state.watchlist || [])]
-    .filter((item) => numberOrNull(bigScreenWatchDailyMetrics(item).profit) != null)
-    .sort((a, b) => (numberOrNull(bigScreenWatchDailyMetrics(b).profit) ?? -Infinity) - (numberOrNull(bigScreenWatchDailyMetrics(a).profit) ?? -Infinity))
+    .filter((item) => numberOrNull(item.todayProfit) != null)
+    .sort((a, b) => (numberOrNull(b.todayProfit) ?? -Infinity) - (numberOrNull(a.todayProfit) ?? -Infinity))
     .slice(0, 8);
 }
 
