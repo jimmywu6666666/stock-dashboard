@@ -67,6 +67,8 @@ const ETF_BACKFILL_DAYS = 30;
 const ETF_HKD_CNY_RATE = Number(process.env.ETF_HKD_CNY_RATE || 0.915);
 const TUSHARE_TOKEN = clean(process.env.TUSHARE_TOKEN || "");
 const TUSHARE_API_URL = cleanBaseUrl(process.env.TUSHARE_API_URL || "https://api.tushare.pro");
+const TUSHARE_HK_DAILY_ENABLED = /^(1|true|yes)$/i.test(clean(process.env.TUSHARE_HK_DAILY_ENABLED || ""));
+const TUSHARE_HK_DAILY_COOLDOWN_MS = Math.max(60_000, Number(process.env.TUSHARE_HK_DAILY_COOLDOWN_MS || 60 * 60 * 1000) || 60 * 60 * 1000);
 const ETF_DAILY_REFRESH_TIMES = parseTimeList(
   process.env.ETF_DAILY_REFRESH_TIMES || "09:45,10:30,11:30,13:30,14:30,15:15,17:45,18:30,20:30,08:30",
   ["09:45", "10:30", "11:30", "13:30", "14:30", "15:15", "17:45", "18:30", "20:30", "08:30"]
@@ -75,6 +77,16 @@ const ETF_DAILY_FULL_REFRESH_TIMES = parseTimeList(process.env.ETF_DAILY_FULL_RE
 const ETF_DAILY_FINAL_TIME = clean(process.env.ETF_DAILY_FINAL_TIME || "08:30") || "08:30";
 const ETF_DAILY_COVERAGE_TARGET = Math.max(0, Math.min(1, Number(process.env.ETF_DAILY_COVERAGE_TARGET || 0.95) || 0.95));
 const ETF_ARCHIVE_MIN_CHANGE_WEIGHT = Math.max(0, Number(process.env.ETF_ARCHIVE_MIN_CHANGE_WEIGHT || 0.5) || 0.5);
+const NT_KEYWORDS = (process.env.NT_KEYWORDS || "中央汇金,汇金资产,中国证券金融,证金,全国社保基金,社保基金,基本养老保险基金,梧桐树投资,国新投资,国家集成电路")
+  .split(",")
+  .map((item) => clean(item))
+  .filter(Boolean);
+const NT_REFRESH_LIMIT = Math.max(1, Math.min(500, Number(process.env.NT_REFRESH_LIMIT || 120) || 120));
+const NT_COST_DISCOUNT = Math.max(0.1, Math.min(1.5, Number(process.env.NT_COST_DISCOUNT || 0.95) || 0.95));
+const NT_AUTO_REFRESH_ENABLED = !/^(0|false|no)$/i.test(clean(process.env.NT_AUTO_REFRESH_ENABLED || "true"));
+const NT_DAILY_REFRESH_TIME = clean(process.env.NT_DAILY_REFRESH_TIME || "20:30") || "20:30";
+const NT_REFRESH_RETRY_COUNT = Math.max(0, Math.min(8, Number(process.env.NT_REFRESH_RETRY_COUNT || 3) || 3));
+const NT_REFRESH_RETRY_DELAY_MS = Math.max(60_000, Number(process.env.NT_REFRESH_RETRY_DELAY_MS || 15 * 60 * 1000) || 15 * 60 * 1000);
 
 function cleanBaseUrl(value) {
   return String(value || "").trim().replace(/\/+$/, "");
@@ -228,6 +240,53 @@ db.exec(`
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL,
     PRIMARY KEY(etfCode, snapshotDate, fetchType)
+  );
+
+  CREATE TABLE IF NOT EXISTS nt_holder_snapshots (
+    tsCode TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    annDate TEXT NOT NULL DEFAULT '',
+    endDate TEXT NOT NULL,
+    holderName TEXT NOT NULL,
+    holdAmount REAL,
+    holdRatio REAL,
+    changeAmount REAL,
+    source TEXT NOT NULL DEFAULT '',
+    updatedAt TEXT NOT NULL,
+    PRIMARY KEY(symbol, endDate, holderName)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_nt_holder_snapshots_symbol ON nt_holder_snapshots(symbol);
+  CREATE INDEX IF NOT EXISTS idx_nt_holder_snapshots_holder ON nt_holder_snapshots(holderName);
+  CREATE INDEX IF NOT EXISTS idx_nt_holder_snapshots_end_date ON nt_holder_snapshots(endDate);
+
+  CREATE TABLE IF NOT EXISTS nt_daily_bars (
+    symbol TEXT NOT NULL,
+    tsCode TEXT NOT NULL,
+    tradeDate TEXT NOT NULL,
+    open REAL,
+    high REAL,
+    low REAL,
+    close REAL,
+    vol REAL,
+    amount REAL,
+    updatedAt TEXT NOT NULL,
+    PRIMARY KEY(symbol, tradeDate)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_nt_daily_bars_ts_code ON nt_daily_bars(tsCode);
+
+  CREATE TABLE IF NOT EXISTS nt_refresh_status (
+    key TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    total INTEGER NOT NULL DEFAULT 0,
+    success INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    startedAt TEXT,
+    finishedAt TEXT,
+    updatedAt TEXT NOT NULL
   );
 
 `);
@@ -3635,6 +3694,54 @@ function scheduleEtfHoldingRefreshTimer() {
   }, delay);
 }
 
+async function runScheduledNationalTeamRefresh() {
+  if (!NT_AUTO_REFRESH_ENABLED) {
+    console.log("skip national team refresh: disabled");
+    return { skipped: true, reason: "disabled" };
+  }
+  if (!TUSHARE_TOKEN) {
+    ntRecordRefreshStatus("skipped", "未配置 TUSHARE_TOKEN", { finishedAt: nowIso() });
+    console.log("skip national team refresh: missing TUSHARE_TOKEN");
+    return { skipped: true, reason: "missing TUSHARE_TOKEN" };
+  }
+  const result = await refreshNationalTeamSnapshots();
+  console.log(`National team refresh: success=${result.success} failed=${result.failed} total=${result.total}`);
+  return result;
+}
+
+function scheduleNationalTeamRefreshTimer(delayMs = nextNationalTeamRefreshDelayMs(), retryLeft = NT_REFRESH_RETRY_COUNT) {
+  if (!NT_AUTO_REFRESH_ENABLED) return;
+  setTimeout(async () => {
+    try {
+      await runScheduledNationalTeamRefresh();
+      scheduleNationalTeamRefreshTimer(nextNationalTeamRefreshDelayMs(), NT_REFRESH_RETRY_COUNT);
+    } catch (error) {
+      const message = readableError(error);
+      console.error("National team refresh failed", message);
+      ntRecordRefreshStatus("failed", message, { finishedAt: nowIso() });
+      if (retryLeft > 0) {
+        scheduleNationalTeamRefreshTimer(NT_REFRESH_RETRY_DELAY_MS, retryLeft - 1);
+      } else {
+        scheduleNationalTeamRefreshTimer(nextNationalTeamRefreshDelayMs(), NT_REFRESH_RETRY_COUNT);
+      }
+    }
+  }, Math.max(1000, delayMs));
+}
+
+function nextNationalTeamRefreshDelayMs() {
+  const normalizedTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(NT_DAILY_REFRESH_TIME) ? NT_DAILY_REFRESH_TIME : "20:30";
+  const now = new Date();
+  let best = null;
+  for (let dayOffset = 0; dayOffset <= 1; dayOffset += 1) {
+    const base = new Date(now.getTime() + dayOffset * 24 * 60 * 60 * 1000);
+    const dateKey = chinaDateKey(base);
+    const candidate = new Date(`${dateKey}T${normalizedTime}:00+08:00`);
+    if (candidate.getTime() <= now.getTime()) continue;
+    if (!best || candidate.getTime() < best.getTime()) best = candidate;
+  }
+  return Math.max(1000, (best || new Date(now.getTime() + 24 * 60 * 60 * 1000)).getTime() - now.getTime());
+}
+
 function nextEtfHoldingRefreshDelayMs() {
   const now = new Date();
   let best = null;
@@ -4035,6 +4142,9 @@ async function etfDailyHoldingStatus() {
   if (!rows.length || !target.snapshotDate) {
     return {
       snapshotDate: target.snapshotDate || "",
+      refreshTargetDate: target.snapshotDate || "",
+      sourcePendingDate: "",
+      dataStatus: "waiting_source",
       targetReason: target.reason || "no-target",
       totalEtfs: rows.length,
       completedEtfs: 0,
@@ -4052,17 +4162,27 @@ async function etfDailyHoldingStatus() {
   }
   const codes = rows.map((row) => row.code);
   const placeholders = codes.map(() => "?").join(",");
-  const snapshotRows = db.prepare(`
+  const targetSnapshotRows = db.prepare(`
     SELECT DISTINCT etfCode
     FROM etf_holding_snapshots
     WHERE snapshotDate = ? AND etfCode IN (${placeholders})
   `).all(target.snapshotDate, ...codes);
+  const latestAvailableDate = latestEtfSnapshotDate(codes);
+  const usePreviousAvailableDate = targetSnapshotRows.length === 0 && latestAvailableDate && latestAvailableDate < target.snapshotDate;
+  const waitingForFirstSnapshot = targetSnapshotRows.length === 0 && !latestAvailableDate;
+  const displaySnapshotDate = usePreviousAvailableDate ? latestAvailableDate : target.snapshotDate;
+  const sourcePendingDate = usePreviousAvailableDate || waitingForFirstSnapshot ? target.snapshotDate : "";
+  const snapshotRows = usePreviousAvailableDate ? db.prepare(`
+    SELECT DISTINCT etfCode
+    FROM etf_holding_snapshots
+    WHERE snapshotDate = ? AND etfCode IN (${placeholders})
+  `).all(displaySnapshotDate, ...codes) : targetSnapshotRows;
   const completed = new Set(snapshotRows.map((row) => row.etfCode));
   const statusRows = db.prepare(`
     SELECT etfCode, status, errorMessage, updatedAt
     FROM etf_holding_fetch_status
     WHERE snapshotDate = ? AND fetchType = 'daily' AND etfCode IN (${placeholders})
-  `).all(target.snapshotDate, ...codes);
+  `).all(displaySnapshotDate, ...codes);
   const statusByCode = new Map(statusRows.map((row) => [row.etfCode, row]));
   const missingRows = rows.filter((row) => !completed.has(row.code));
   const completedEtfs = completed.size;
@@ -4071,8 +4191,12 @@ async function etfDailyHoldingStatus() {
     if (!row.updatedAt) return latest;
     return !latest || row.updatedAt > latest ? row.updatedAt : latest;
   }, "");
+  const coverageTargetMet = completionRatio >= ETF_DAILY_COVERAGE_TARGET;
   return {
-    snapshotDate: target.snapshotDate,
+    snapshotDate: displaySnapshotDate,
+    refreshTargetDate: target.snapshotDate,
+    sourcePendingDate,
+    dataStatus: sourcePendingDate ? "waiting_source" : coverageTargetMet ? "ready" : "collecting",
     targetReason: target.reason || "",
     totalEtfs: rows.length,
     completedEtfs,
@@ -4080,7 +4204,7 @@ async function etfDailyHoldingStatus() {
     completionRatio: Number(completionRatio.toFixed(4)),
     completionPercent: Number((completionRatio * 100).toFixed(1)),
     coverageTarget: ETF_DAILY_COVERAGE_TARGET,
-    coverageTargetMet: completionRatio >= ETF_DAILY_COVERAGE_TARGET,
+    coverageTargetMet,
     refreshTimes: ETF_DAILY_REFRESH_TIMES,
     fullRefreshTimes: ETF_DAILY_FULL_REFRESH_TIMES,
     finalAttemptTime: ETF_DAILY_FINAL_TIME,
@@ -4291,11 +4415,572 @@ async function fetchTushareApi(apiName, params = {}, fields = "") {
       referer: "https://tushare.pro/"
     }
   });
-  if (raw?.code !== 0) throw new Error(`Tushare ${apiName} 返回异常: ${clean(raw?.msg || raw?.message || raw?.code)}`);
+  if (raw?.code !== 0) {
+    const error = new Error(`Tushare ${apiName} 返回异常: ${clean(raw?.msg || raw?.message || raw?.code)}`);
+    error.code = raw?.code;
+    error.tushareCode = raw?.code;
+    error.tushareMessage = clean(raw?.msg || raw?.message || "");
+    throw error;
+  }
   const fieldNames = Array.isArray(raw?.data?.fields) ? raw.data.fields : [];
   const items = Array.isArray(raw?.data?.items) ? raw.data.items : [];
   if (!items.length) throw new Error(`Tushare ${apiName} 无数据`);
   return items.map((values) => Object.fromEntries(fieldNames.map((field, index) => [field, values[index]])));
+}
+
+async function fetchTushareApiOptional(apiName, params = {}, fields = "") {
+  try {
+    return await fetchTushareApi(apiName, params, fields);
+  } catch (error) {
+    if (/无数据|empty|没有数据/i.test(readableError(error))) return [];
+    throw error;
+  }
+}
+
+function ntTsCode(symbolInput) {
+  const symbol = clean(symbolInput).replace(/\D/g, "").padStart(6, "0").slice(-6);
+  if (!/^\d{6}$/.test(symbol)) return "";
+  return `${symbol}.${inferMarket(symbol)}`;
+}
+
+function ntSymbolFromTsCode(tsCode) {
+  return clean(tsCode).split(".")[0].padStart(6, "0");
+}
+
+function ntHolderMatches(holderName) {
+  const normalized = clean(holderName).replace(/\s+/g, "");
+  return NT_KEYWORDS.some((keyword) => normalized.includes(keyword.replace(/\s+/g, "")));
+}
+
+function ntHolderGroup(holderName) {
+  const textValue = clean(holderName);
+  if (/中央汇金|汇金资产|中国证券金融|证金/.test(textValue)) return "国家队核心";
+  if (/全国社保基金|社保基金/.test(textValue)) return "社保基金";
+  if (/基本养老保险基金/.test(textValue)) return "养老金";
+  if (/国新投资|国家集成电路|梧桐树投资/.test(textValue)) return "战略投资";
+  return "其他";
+}
+
+function ntStatusForProfit(profitRate) {
+  const value = numberOrNull(profitRate);
+  if (value == null) return "未知";
+  if (value < -0.1) return "深套";
+  if (value <= 0) return "被套";
+  if (value <= 0.2) return "盈利";
+  return "高利";
+}
+
+function ntChangeText(current, previous, opCost, currPrice) {
+  if (!previous) return "新进建仓";
+  const nowAmount = numberOrNull(current.holdAmount) || 0;
+  const prevAmount = numberOrNull(previous.holdAmount) || 0;
+  if (!prevAmount) return "新进建仓";
+  const diff = nowAmount - prevAmount;
+  if (Math.abs(diff) < 0.0001) return `(${previous.endDate}) 持仓未动`;
+  const pct = Math.abs(diff / prevAmount * 100);
+  const action = diff > 0 ? "加仓" : "减仓";
+  const opCostText = opCost ? ` | 均价≈${opCost.toFixed(2)}` : "";
+  const currText = opCost && currPrice ? ` (现价较其${((currPrice - opCost) / opCost * 100).toFixed(1)}%)` : "";
+  return `(${previous.endDate}) ${action}${pct.toFixed(1)}%${opCostText}${currText}`;
+}
+
+function ntChangeMeta(current, previous, opCost, currPrice) {
+  const currentHold = numberOrNull(current?.holdAmount);
+  const previousHold = numberOrNull(previous?.holdAmount);
+  if (!previous || previousHold == null || !previousHold) {
+    return {
+      previousHoldAmount: null,
+      holdChangeAmount: null,
+      holdChangeRate: null,
+      changeDirection: "new",
+      changeText: "新进建仓"
+    };
+  }
+  const holdChangeAmount = (currentHold || 0) - previousHold;
+  if (Math.abs(holdChangeAmount) < 0.0001) {
+    return {
+      previousHoldAmount: previousHold,
+      holdChangeAmount: 0,
+      holdChangeRate: 0,
+      changeDirection: "unchanged",
+      changeText: `(${previous.endDate}) 持仓未动`
+    };
+  }
+  const holdChangeRate = holdChangeAmount / previousHold;
+  const action = holdChangeAmount > 0 ? "加仓" : "减仓";
+  const opCostText = opCost ? ` | 均价≈${opCost.toFixed(2)}` : "";
+  const currText = opCost && currPrice ? ` (现价较其${((currPrice - opCost) / opCost * 100).toFixed(1)}%)` : "";
+  return {
+    previousHoldAmount: previousHold,
+    holdChangeAmount,
+    holdChangeRate,
+    changeDirection: holdChangeAmount > 0 ? "add" : "reduce",
+    changeText: `(${previous.endDate}) ${action}${Math.abs(holdChangeRate * 100).toFixed(1)}%${opCostText}${currText}`
+  };
+}
+
+function ntInsertHolderRows(rows, fallbackName = "") {
+  if (!rows.length) return 0;
+  const stmt = db.prepare(`
+    INSERT INTO nt_holder_snapshots (tsCode, symbol, name, annDate, endDate, holderName, holdAmount, holdRatio, changeAmount, source, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(symbol, endDate, holderName) DO UPDATE SET
+      tsCode = excluded.tsCode,
+      name = COALESCE(NULLIF(excluded.name, ''), nt_holder_snapshots.name),
+      annDate = excluded.annDate,
+      holdAmount = excluded.holdAmount,
+      holdRatio = excluded.holdRatio,
+      changeAmount = excluded.changeAmount,
+      source = excluded.source,
+      updatedAt = excluded.updatedAt
+  `);
+  const now = nowIso();
+  let count = 0;
+  for (const row of rows) {
+    const tsCode = clean(row.ts_code);
+    const symbol = ntSymbolFromTsCode(tsCode);
+    const holderName = clean(row.holder_name || row.float_holder_name || row.holderName);
+    const endDate = dashDateKey(row.end_date || row.endDate);
+    if (!symbol || !holderName || !endDate || !ntHolderMatches(holderName)) continue;
+    stmt.run(
+      tsCode || ntTsCode(symbol),
+      symbol,
+      clean(row.name || fallbackName || ""),
+      dashDateKey(row.ann_date || row.annDate),
+      endDate,
+      holderName,
+      numberOrNull(row.hold_amount ?? row.holdAmount),
+      numberOrNull(row.hold_ratio ?? row.holdRatio),
+      numberOrNull(row.hold_change ?? row.hold_num_change ?? row.changeAmount),
+      clean(row.source || "tushare"),
+      now
+    );
+    count += 1;
+  }
+  return count;
+}
+
+async function fetchNtHolderSnapshotsForSymbol(symbolInput) {
+  if (!TUSHARE_TOKEN) throw new Error("未配置 TUSHARE_TOKEN");
+  const symbol = clean(symbolInput).replace(/\D/g, "").padStart(6, "0").slice(-6);
+  const tsCode = ntTsCode(symbol);
+  if (!tsCode) throw new Error(`股票代码无效：${symbolInput}`);
+  const fields = "ts_code,ann_date,end_date,holder_name,hold_amount,hold_ratio";
+  const [holders, floatHolders] = await Promise.all([
+    fetchTushareApiOptional("top10_holders", { ts_code: tsCode }, fields),
+    fetchTushareApiOptional("top10_floatholders", { ts_code: tsCode }, fields)
+  ]);
+  const name = db.prepare("SELECT name FROM nt_holder_snapshots WHERE symbol = ? AND name <> '' ORDER BY updatedAt DESC LIMIT 1").get(symbol)?.name
+    || db.prepare("SELECT name FROM watchlist WHERE symbol = ? AND name <> '' ORDER BY updatedAt DESC LIMIT 1").get(symbol)?.name
+    || "";
+  return ntInsertHolderRows([
+    ...holders.map((row) => ({ ...row, source: "tushare-top10-holders" })),
+    ...floatHolders.map((row) => ({ ...row, source: "tushare-top10-floatholders" }))
+  ], name);
+}
+
+function ntRecordRefreshStatus(status, message = "", totals = {}) {
+  const now = nowIso();
+  db.prepare(`
+    INSERT INTO nt_refresh_status (key, status, message, total, success, failed, startedAt, finishedAt, updatedAt)
+    VALUES ('national-team', ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET
+      status = excluded.status,
+      message = excluded.message,
+      total = excluded.total,
+      success = excluded.success,
+      failed = excluded.failed,
+      startedAt = COALESCE(excluded.startedAt, nt_refresh_status.startedAt),
+      finishedAt = excluded.finishedAt,
+      updatedAt = excluded.updatedAt
+  `).run(
+    status,
+    clean(message),
+    Number(totals.total || 0),
+    Number(totals.success || 0),
+    Number(totals.failed || 0),
+    totals.startedAt || null,
+    totals.finishedAt || null,
+    now
+  );
+}
+
+function ntRefreshStatus() {
+  return db.prepare("SELECT * FROM nt_refresh_status WHERE key = 'national-team'").get() || null;
+}
+
+function ntRefreshSymbols(inputSymbols = []) {
+  const explicit = (inputSymbols || []).map((item) => clean(item).replace(/\D/g, "").padStart(6, "0").slice(-6)).filter((item) => /^\d{6}$/.test(item));
+  if (explicit.length) return uniqueBy(explicit, (item) => item).slice(0, NT_REFRESH_LIMIT);
+  const rows = [
+    ...db.prepare("SELECT DISTINCT symbol FROM watchlist WHERE symbol GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]' ORDER BY sortOrder ASC, id ASC LIMIT ?").all(NT_REFRESH_LIMIT),
+    ...db.prepare("SELECT DISTINCT symbol FROM nt_holder_snapshots ORDER BY updatedAt DESC LIMIT ?").all(NT_REFRESH_LIMIT)
+  ];
+  return uniqueBy(rows.map((row) => clean(row.symbol)), (item) => item).slice(0, NT_REFRESH_LIMIT);
+}
+
+async function refreshNationalTeamSnapshots(symbols = []) {
+  const targetSymbols = ntRefreshSymbols(symbols);
+  if (!TUSHARE_TOKEN) throw new Error("未配置 TUSHARE_TOKEN");
+  if (!targetSymbols.length) throw new Error("暂无可刷新的股票代码，请先添加自选股或传入 symbols");
+  const startedAt = nowIso();
+  ntRecordRefreshStatus("running", "刷新中", { total: targetSymbols.length, startedAt });
+  let success = 0;
+  let failed = 0;
+  const failures = [];
+  await mapWithConcurrency(targetSymbols, 3, async (symbol) => {
+    try {
+      await fetchNtHolderSnapshotsForSymbol(symbol);
+      await ensureNtDailyBars(symbol);
+      success += 1;
+    } catch (error) {
+      failed += 1;
+      failures.push(`${symbol}: ${readableError(error)}`);
+    }
+  });
+  const message = failures.slice(0, 3).join("；");
+  ntRecordRefreshStatus(failed ? "partial" : "success", message, {
+    total: targetSymbols.length,
+    success,
+    failed,
+    startedAt,
+    finishedAt: nowIso()
+  });
+  return { total: targetSymbols.length, success, failed, failures: failures.slice(0, 10), updatedAt: nowIso() };
+}
+
+async function ensureNtDailyBars(symbolInput) {
+  const symbol = clean(symbolInput).replace(/\D/g, "").padStart(6, "0").slice(-6);
+  const tsCode = ntTsCode(symbol);
+  if (!tsCode || !TUSHARE_TOKEN) return 0;
+  const coverage = db.prepare("SELECT MIN(tradeDate) AS minDate, MAX(tradeDate) AS maxDate FROM nt_daily_bars WHERE symbol = ?").get(symbol);
+  const firstSnapshotDate = db.prepare("SELECT MIN(endDate) AS endDate FROM nt_holder_snapshots WHERE symbol = ?").get(symbol)?.endDate;
+  const neededStart = firstSnapshotDate ? dateKeyOffset(firstSnapshotDate, -100) : dateKeyOffset(chinaDateKey(), -420);
+  const today = chinaDateKey();
+  const ranges = [];
+  if (!coverage?.minDate) {
+    ranges.push([neededStart, today]);
+  } else {
+    if (coverage.minDate > neededStart) ranges.push([neededStart, dateKeyOffset(coverage.minDate, -1)]);
+    if (coverage.maxDate < today) ranges.push([dateKeyOffset(coverage.maxDate, 1), today]);
+  }
+  const validRanges = ranges.filter(([start, end]) => compactDateKey(start) <= compactDateKey(end));
+  if (!validRanges.length) return 0;
+  const stmt = db.prepare(`
+    INSERT INTO nt_daily_bars (symbol, tsCode, tradeDate, open, high, low, close, vol, amount, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(symbol, tradeDate) DO UPDATE SET
+      open = excluded.open,
+      high = excluded.high,
+      low = excluded.low,
+      close = excluded.close,
+      vol = excluded.vol,
+      amount = excluded.amount,
+      updatedAt = excluded.updatedAt
+  `);
+  const now = nowIso();
+  let saved = 0;
+  for (const [startDate, endDate] of validRanges) {
+    const rows = await fetchTushareApiOptional("daily", {
+      ts_code: tsCode,
+      start_date: compactDateKey(startDate),
+      end_date: compactDateKey(endDate)
+    }, "ts_code,trade_date,open,high,low,close,vol,amount");
+    for (const row of rows) {
+      stmt.run(
+        symbol,
+        tsCode,
+        dashDateKey(row.trade_date),
+        numberOrNull(row.open),
+        numberOrNull(row.high),
+        numberOrNull(row.low),
+        numberOrNull(row.close),
+        numberOrNull(row.vol),
+        numberOrNull(row.amount) != null ? numberOrNull(row.amount) * 1000 : null,
+        now
+      );
+      saved += 1;
+    }
+  }
+  return saved;
+}
+
+function ntLatestPrice(symbol) {
+  const row = db.prepare("SELECT close, tradeDate FROM nt_daily_bars WHERE symbol = ? AND close IS NOT NULL ORDER BY tradeDate DESC LIMIT 1").get(symbol);
+  return row ? { price: numberOrNull(row.close), date: row.tradeDate } : { price: null, date: "" };
+}
+
+function ntQuarterVwap(symbol, endDate) {
+  const startDate = dateKeyOffset(endDate, -90);
+  const row = db.prepare(`
+    SELECT SUM(amount) AS amount, SUM(vol) AS vol
+    FROM nt_daily_bars
+    WHERE symbol = ? AND tradeDate >= ? AND tradeDate <= ?
+  `).get(symbol, startDate, endDate);
+  let amount = numberOrNull(row?.amount);
+  let vol = numberOrNull(row?.vol);
+  if (amount != null && vol) return amount / (vol * 100);
+  const nextTrade = db.prepare(`
+    SELECT MIN(tradeDate) AS tradeDate
+    FROM nt_daily_bars
+    WHERE symbol = ? AND tradeDate > ?
+  `).get(symbol, endDate)?.tradeDate;
+  if (!nextTrade) return null;
+  const fallbackEndDate = dateKeyOffset(nextTrade, 90);
+  const fallback = db.prepare(`
+    SELECT SUM(amount) AS amount, SUM(vol) AS vol
+    FROM nt_daily_bars
+    WHERE symbol = ? AND tradeDate >= ? AND tradeDate <= ?
+  `).get(symbol, nextTrade, fallbackEndDate);
+  amount = numberOrNull(fallback?.amount);
+  vol = numberOrNull(fallback?.vol);
+  return amount != null && vol ? amount / (vol * 100) : null;
+}
+
+function ntLatestSnapshotRows() {
+  const rows = db.prepare(`
+    SELECT s.*
+    FROM nt_holder_snapshots s
+    JOIN (
+      SELECT symbol, holderName, MAX(endDate) AS endDate
+      FROM nt_holder_snapshots
+      GROUP BY symbol, holderName
+    ) latest ON latest.symbol = s.symbol AND latest.holderName = s.holderName AND latest.endDate = s.endDate
+    ORDER BY s.endDate DESC, s.symbol ASC, s.holderName ASC
+  `).all();
+  return rows.map(ntPositionRow);
+}
+
+function ntPreviousSnapshot(row) {
+  return db.prepare(`
+    SELECT *
+    FROM nt_holder_snapshots
+    WHERE symbol = ? AND holderName = ? AND endDate < ?
+    ORDER BY endDate DESC
+    LIMIT 1
+  `).get(row.symbol, row.holderName, row.endDate);
+}
+
+function ntFirstSnapshot(row) {
+  return db.prepare(`
+    SELECT *
+    FROM nt_holder_snapshots
+    WHERE symbol = ? AND holderName = ?
+    ORDER BY endDate ASC
+    LIMIT 1
+  `).get(row.symbol, row.holderName) || row;
+}
+
+function ntPositionRow(row) {
+  const first = ntFirstSnapshot(row);
+  const previous = ntPreviousSnapshot(row);
+  const latest = ntLatestPrice(row.symbol);
+  const firstVwap = ntQuarterVwap(row.symbol, first.endDate);
+  const opVwap = ntQuarterVwap(row.symbol, row.endDate);
+  const estCost = firstVwap ? firstVwap * NT_COST_DISCOUNT : null;
+  const currPrice = latest.price;
+  const holdAmount = numberOrNull(row.holdAmount);
+  const positionValue = holdAmount != null && currPrice != null ? holdAmount * currPrice : null;
+  const profitRate = estCost && currPrice != null ? (currPrice - estCost) / estCost : null;
+  const profitValue = positionValue != null && estCost ? (currPrice - estCost) * holdAmount : null;
+  const changeMeta = ntChangeMeta(row, previous, opVwap ? opVwap * NT_COST_DISCOUNT : null, currPrice);
+  return {
+    symbol: row.symbol,
+    tsCode: row.tsCode,
+    name: row.name || row.symbol,
+    holderName: row.holderName,
+    holderGroup: ntHolderGroup(row.holderName),
+    annDate: row.annDate || "",
+    endDate: row.endDate,
+    firstEndDate: first.endDate,
+    holdAmount,
+    holdRatio: numberOrNull(row.holdRatio),
+    changeAmount: numberOrNull(row.changeAmount),
+    estCost,
+    currPrice,
+    priceDate: latest.date,
+    profitRate,
+    profitValue,
+    positionValue,
+    status: ntStatusForProfit(profitRate),
+    previousHoldAmount: changeMeta.previousHoldAmount,
+    holdChangeAmount: changeMeta.holdChangeAmount,
+    holdChangeRate: changeMeta.holdChangeRate,
+    changeDirection: changeMeta.changeDirection,
+    changeText: changeMeta.changeText,
+    source: row.source || "",
+    updatedAt: row.updatedAt || ""
+  };
+}
+
+function ntFilteredPositions(params = {}) {
+  const group = clean(params.group || "");
+  const holder = clean(params.holder || "");
+  const status = clean(params.status || "");
+  const query = clean(params.query || "").toUpperCase();
+  const endDate = clean(params.endDate || "");
+  return ntLatestSnapshotRows().filter((row) => {
+    if (group && row.holderGroup !== group) return false;
+    if (holder && row.holderName !== holder) return false;
+    if (status && row.status !== status) return false;
+    if (endDate && row.endDate !== endDate) return false;
+    if (query && !`${row.symbol} ${row.name} ${row.holderName}`.toUpperCase().includes(query)) return false;
+    return true;
+  });
+}
+
+function ntStockSummaryRow(symbolRows) {
+  const rows = symbolRows.filter(Boolean);
+  const firstRow = rows[0] || {};
+  const positionValue = sumNumbers(rows.map((row) => row.positionValue));
+  const profitValue = sumNumbers(rows.map((row) => row.profitValue));
+  const totalShares = sumNumbers(rows.map((row) => numberOrNull(row.holdAmount) || 0));
+  const costValue = sumNumbers(rows.map((row) => {
+    const shares = numberOrNull(row.holdAmount) || 0;
+    const estCost = numberOrNull(row.estCost);
+    return shares && estCost != null ? shares * estCost : null;
+  }));
+  const weightedCost = totalShares && costValue != null ? costValue / totalShares : null;
+  const currPrice = numberOrNull(firstRow.currPrice);
+  const profitRate = weightedCost && currPrice != null ? (currPrice - weightedCost) / weightedCost : null;
+  const latestEndDate = rows.map((row) => row.endDate).filter(Boolean).sort().at(-1) || "";
+  const groups = [...new Set(rows.map((row) => row.holderGroup).filter(Boolean))];
+  const addCount = rows.filter((row) => row.changeDirection === "add" || row.changeDirection === "new").length;
+  const reduceCount = rows.filter((row) => row.changeDirection === "reduce").length;
+  const unchangedCount = rows.filter((row) => row.changeDirection === "unchanged").length;
+  const unknownCount = Math.max(0, rows.length - addCount - reduceCount - unchangedCount);
+  const comparableRows = rows.filter((row) => numberOrNull(row.previousHoldAmount) != null && numberOrNull(row.previousHoldAmount) > 0);
+  const netComparablePreviousHoldAmount = sumNumbers(comparableRows.map((row) => row.previousHoldAmount));
+  const netComparableChangeAmount = sumNumbers(comparableRows.map((row) => row.holdChangeAmount));
+  const netComparableChangeRate = netComparablePreviousHoldAmount ? (netComparableChangeAmount || 0) / netComparablePreviousHoldAmount : null;
+  const netChangeDirection = netComparableChangeRate == null
+    ? "new"
+    : Math.abs(netComparableChangeRate) < 0.000001
+      ? "unchanged"
+      : netComparableChangeRate > 0 ? "add" : "reduce";
+  const changeParts = [];
+  if (netComparableChangeRate == null) {
+    changeParts.push("新进为主");
+  } else if (netChangeDirection === "add") {
+    changeParts.push(`净加仓 +${(netComparableChangeRate * 100).toFixed(1)}%`);
+  } else if (netChangeDirection === "reduce") {
+    changeParts.push(`净减仓 ${(netComparableChangeRate * 100).toFixed(1)}%`);
+  } else {
+    changeParts.push("净持平 0.0%");
+  }
+  if (addCount) changeParts.push(`加仓/新进 ${addCount}`);
+  if (reduceCount) changeParts.push(`减仓 ${reduceCount}`);
+  if (unchangedCount) changeParts.push(`未动 ${unchangedCount}`);
+  if (unknownCount) changeParts.push(`其他 ${unknownCount}`);
+  return {
+    symbol: firstRow.symbol,
+    tsCode: firstRow.tsCode,
+    name: firstRow.name || firstRow.symbol,
+    holderName: rows.map((row) => row.holderName).filter(Boolean).join("、"),
+    holderGroup: groups.join("、"),
+    holderGroups: groups,
+    holderCount: rows.length,
+    annDate: rows.map((row) => row.annDate).filter(Boolean).sort().at(-1) || "",
+    endDate: latestEndDate,
+    firstEndDate: rows.map((row) => row.firstEndDate).filter(Boolean).sort()[0] || "",
+    holdAmount: totalShares || null,
+    holdRatio: sumNumbers(rows.map((row) => row.holdRatio)),
+    changeAmount: sumNumbers(rows.map((row) => row.changeAmount)),
+    estCost: weightedCost,
+    currPrice,
+    priceDate: firstRow.priceDate || "",
+    profitRate,
+    profitValue,
+    positionValue,
+    status: ntStatusForProfit(profitRate),
+    changeText: changeParts.join(" | ") || "--",
+    netComparablePreviousHoldAmount,
+    netComparableChangeAmount,
+    netComparableChangeRate,
+    netChangeDirection,
+    addCount,
+    reduceCount,
+    unchangedCount,
+    source: rows.map((row) => row.source).filter(Boolean).sort().at(-1) || "",
+    updatedAt: rows.map((row) => row.updatedAt).filter(Boolean).sort().at(-1) || "",
+    positions: rows.sort((a, b) => (numberOrNull(b.positionValue) || 0) - (numberOrNull(a.positionValue) || 0))
+  };
+}
+
+function ntStockSummaryRows(positionRows = []) {
+  const grouped = positionRows.reduce((acc, row) => {
+    acc[row.symbol] ||= [];
+    acc[row.symbol].push(row);
+    return acc;
+  }, {});
+  return Object.values(grouped)
+    .map(ntStockSummaryRow)
+    .sort((a, b) => (numberOrNull(b.positionValue) || 0) - (numberOrNull(a.positionValue) || 0));
+}
+
+function nationalTeamOverview() {
+  const positionRows = ntLatestSnapshotRows();
+  const rows = ntStockSummaryRows(positionRows);
+  const valued = rows.filter((row) => numberOrNull(row.positionValue) != null);
+  const totalValue = sumNumbers(valued.map((row) => row.positionValue));
+  const totalProfit = sumNumbers(rows.map((row) => row.profitValue));
+  const distribution = Object.values(positionRows.reduce((acc, row) => {
+    const key = row.holderGroup || "其他";
+    acc[key] ||= { group: key, count: 0, positionValue: 0 };
+    acc[key].count += 1;
+    acc[key].positionValue += numberOrNull(row.positionValue) || 0;
+    return acc;
+  }, {})).sort((a, b) => b.positionValue - a.positionValue);
+  return {
+    totalCount: rows.length,
+    totalValue,
+    profitCount: rows.filter((row) => numberOrNull(row.profitRate) > 0).length,
+    trappedCount: rows.filter((row) => numberOrNull(row.profitRate) != null && numberOrNull(row.profitRate) <= 0).length,
+    addCount: rows.filter((row) => /加仓|新进/.test(row.changeText)).length,
+    reduceCount: rows.filter((row) => /减仓/.test(row.changeText)).length,
+    weightedProfitRate: totalValue && totalProfit != null ? totalProfit / totalValue : null,
+    groups: distribution,
+    topPositions: [...rows].sort((a, b) => (numberOrNull(b.positionValue) || 0) - (numberOrNull(a.positionValue) || 0)).slice(0, 8),
+    positionCount: positionRows.length,
+    holders: [...new Set(positionRows.map((row) => row.holderName).filter(Boolean))].sort(),
+    groupsAvailable: [...new Set(positionRows.map((row) => row.holderGroup).filter(Boolean))].sort(),
+    statuses: [...new Set(rows.map((row) => row.status).filter(Boolean))],
+    endDates: [...new Set(positionRows.map((row) => row.endDate).filter(Boolean))].sort().reverse(),
+    refreshStatus: ntRefreshStatus(),
+    configured: Boolean(TUSHARE_TOKEN),
+    updatedAt: rows.map((row) => row.updatedAt).filter(Boolean).sort().at(-1) || ""
+  };
+}
+
+function nationalTeamStock(symbolInput) {
+  const symbol = clean(symbolInput).replace(/\D/g, "").padStart(6, "0").slice(-6);
+  if (!/^\d{6}$/.test(symbol)) throw new Error("股票代码不能为空");
+  const snapshots = db.prepare("SELECT * FROM nt_holder_snapshots WHERE symbol = ? ORDER BY holderName ASC, endDate ASC").all(symbol);
+  const positions = ntLatestSnapshotRows().filter((row) => row.symbol === symbol);
+  const bars = db.prepare("SELECT tradeDate, open, high, low, close, vol FROM nt_daily_bars WHERE symbol = ? ORDER BY tradeDate ASC").all(symbol).slice(-160);
+  return {
+    symbol,
+    name: positions[0]?.name || snapshots[0]?.name || symbol,
+    positions,
+    history: snapshots.map((row) => ({
+      symbol: row.symbol,
+      name: row.name || row.symbol,
+      holderName: row.holderName,
+      holderGroup: ntHolderGroup(row.holderName),
+      endDate: row.endDate,
+      holdAmount: numberOrNull(row.holdAmount),
+      holdRatio: numberOrNull(row.holdRatio),
+      source: row.source || ""
+    })),
+    bars: bars.map((row) => ({
+      date: row.tradeDate,
+      open: numberOrNull(row.open),
+      high: numberOrNull(row.high),
+      low: numberOrNull(row.low),
+      close: numberOrNull(row.close),
+      volume: numberOrNull(row.vol)
+    }))
+  };
 }
 
 function tushareApiEndpoint(apiName) {
@@ -4564,6 +5249,7 @@ function etfFetchSummary(results, snapshotDate, requestedEtfs) {
 
 async function etfHoldingChanges({ primary = "", secondary = "", period = ETF_DEFAULT_PERIOD } = {}) {
   const safePeriod = ETF_HOLDING_PERIODS.includes(Number(period)) ? Number(period) : ETF_DEFAULT_PERIOD;
+  const growthThresholds = etfGrowthThresholds(safePeriod);
   const etfs = etfsForCategory(clean(primary), clean(secondary));
   if (!etfs.length) throw new Error("当前分类下没有 ETF");
   const etfCodes = etfs.map((row) => row.code);
@@ -4579,8 +5265,8 @@ async function etfHoldingChanges({ primary = "", secondary = "", period = ETF_DE
   const previousMap = new Map(previousRows.map((row) => [`${row.etfCode}:${row.stockCode}`, row]));
   const latestMap = new Map(latestRows.map((row) => [`${row.etfCode}:${row.stockCode}`, row]));
   const newEntries = [];
-  const growth5Entries = [];
-  const growth10Entries = [];
+  const growthStrongEntries = [];
+  const growthLargeEntries = [];
   for (const latest of latestRows) {
     const previous = previousMap.get(`${latest.etfCode}:${latest.stockCode}`);
     const oldWeight = previous ? numberOrNull(previous.weight) : null;
@@ -4588,8 +5274,8 @@ async function etfHoldingChanges({ primary = "", secondary = "", period = ETF_DE
     const change = latestWeight == null ? null : latestWeight - (oldWeight == null ? 0 : oldWeight);
     const detail = etfHoldingDetail(latest, previous, etfByCode[latest.etfCode], oldWeight, latestWeight, change);
     if (!previous) newEntries.push(detail);
-    if (change != null && change >= 5) growth5Entries.push(detail);
-    if (change != null && change >= 10) growth10Entries.push(detail);
+    if (previous && change != null && change >= growthThresholds.strong) growthStrongEntries.push(detail);
+    if (previous && change != null && change >= growthThresholds.large) growthLargeEntries.push(detail);
   }
   const removedEntries = [];
   for (const previous of previousRows) {
@@ -4598,7 +5284,12 @@ async function etfHoldingChanges({ primary = "", secondary = "", period = ETF_DE
   }
   const latestEtfs = new Set(latestRowsRaw.map((row) => row.etfCode));
   const previousEtfs = new Set(previousRowsRaw.map((row) => row.etfCode));
+  const comparableEtfs = [...latestEtfs].filter((code) => previousEtfs.has(code)).length;
   const failedStatuses = etfFetchFailures(etfCodes, latestDate);
+  const newStocks = await aggregateEtfStockChanges(newEntries, compareDate, latestDate);
+  const growthStrong = await aggregateEtfStockChanges(growthStrongEntries, compareDate, latestDate);
+  const growthLarge = await aggregateEtfStockChanges(growthLargeEntries, compareDate, latestDate);
+  const removed = await aggregateEtfStockChanges(removedEntries, compareDate, latestDate);
   return {
     primary,
     secondary,
@@ -4608,6 +5299,8 @@ async function etfHoldingChanges({ primary = "", secondary = "", period = ETF_DE
     requestedEtfs: etfs.length,
     latestEtfs: latestEtfs.size,
     compareEtfs: previousEtfs.size,
+    comparableEtfs,
+    growthThresholds,
     partial: failedStatuses.length > 0 || latestEtfs.size < etfs.length || previousEtfs.size < etfs.length,
     coverageMessage: [
       latestEtfs.size < etfs.length || previousEtfs.size < etfs.length ? "部分 ETF 缺少可用快照，统计为部分覆盖" : "",
@@ -4617,12 +5310,233 @@ async function etfHoldingChanges({ primary = "", secondary = "", period = ETF_DE
     ].filter(Boolean).join("；"),
     failures: failedStatuses,
     summary: {
-      newStocks: await aggregateEtfStockChanges(newEntries, compareDate, latestDate),
-      growth5: await aggregateEtfStockChanges(growth5Entries, compareDate, latestDate),
-      growth10: await aggregateEtfStockChanges(growth10Entries, compareDate, latestDate),
-      removed: await aggregateEtfStockChanges(removedEntries, compareDate, latestDate)
+      newStocks,
+      growthStrong,
+      growthLarge,
+      growth5: growthStrong,
+      growth10: growthLarge,
+      removed
     }
   };
+}
+
+function etfGrowthThresholds(period) {
+  if (Number(period) === 5) return { strong: 0.8, large: 1.5 };
+  if (Number(period) === 10) return { strong: 1.5, large: 3 };
+  if (Number(period) === 30) return { strong: 3, large: 5 };
+  return { strong: 2, large: 4 };
+}
+
+async function etfStockHoldingLookup({ stock = "", period = ETF_DEFAULT_PERIOD } = {}) {
+  const query = clean(stock);
+  if (!query) throw new Error("请输入股票代码或名称");
+  const safePeriod = ETF_HOLDING_PERIODS.includes(Number(period)) ? Number(period) : ETF_DEFAULT_PERIOD;
+  const lookupPeriods = [5, 10, 15, 30];
+  const etfs = etfCategoryRowsFromDb();
+  if (!etfs.length) throw new Error("暂无 ETF 分类数据");
+  const etfCodes = etfs.map((row) => row.code);
+  const latestDate = lookupEtfSnapshotDate(etfCodes);
+  if (!latestDate) throw new Error("暂无 ETF 持仓快照");
+  const compareDates = Object.fromEntries(lookupPeriods.map((item) => [item, compareEtfSnapshotDate(etfCodes, latestDate, item)]));
+  const compareDate = compareDates[safePeriod] || compareDates[15] || "";
+  const stockInfo = resolveEtfHoldingStock(query, latestDate, etfCodes);
+  const latestRows = stockInfo?.stockCode ? etfStockSnapshotRows(etfCodes, latestDate, stockInfo.stockCode) : [];
+  const periodPreviousRows = Object.fromEntries(lookupPeriods.map((item) => [
+    item,
+    stockInfo?.stockCode && compareDates[item] ? etfStockSnapshotRows(etfCodes, compareDates[item], stockInfo.stockCode) : []
+  ]));
+  const periodPreviousByEtf = Object.fromEntries(lookupPeriods.map((item) => [
+    item,
+    new Map(periodPreviousRows[item].map((row) => [row.etfCode, row]))
+  ]));
+  const previousRows = periodPreviousRows[safePeriod] || [];
+  const previousByEtf = periodPreviousByEtf[safePeriod] || new Map();
+  const latestByEtf = new Map(latestRows.map((row) => [row.etfCode, row]));
+  const etfByCode = Object.fromEntries(etfs.map((row) => [row.code, row]));
+  const details = latestRows.map((latest) => {
+    const periodChanges = Object.fromEntries(lookupPeriods.map((item) => {
+      const previousForPeriod = periodPreviousByEtf[item].get(latest.etfCode);
+      const oldWeightForPeriod = previousForPeriod ? numberOrNull(previousForPeriod.weight) : null;
+      const latestWeightForPeriod = numberOrNull(latest.weight);
+      const changeForPeriod = latestWeightForPeriod == null ? null : latestWeightForPeriod - (oldWeightForPeriod == null ? 0 : oldWeightForPeriod);
+      return [item, {
+        period: item,
+        compareDate: compareDates[item] || "",
+        oldWeight: oldWeightForPeriod,
+        latestWeight: latestWeightForPeriod,
+        weightChange: changeForPeriod,
+        status: etfHoldingStatus(latest, previousForPeriod, changeForPeriod)
+      }];
+    }));
+    const previous = previousByEtf.get(latest.etfCode);
+    const oldWeight = periodChanges[safePeriod]?.oldWeight ?? (previous ? numberOrNull(previous.weight) : null);
+    const latestWeight = numberOrNull(latest.weight);
+    const change = periodChanges[safePeriod]?.weightChange ?? (latestWeight == null ? null : latestWeight - (oldWeight == null ? 0 : oldWeight));
+    return {
+      ...etfHoldingDetail(latest, previous, etfByCode[latest.etfCode], oldWeight, latestWeight, change),
+      periodChanges,
+      primaryCategory: etfByCode[latest.etfCode]?.primaryCategory || "",
+      secondaryCategory: etfByCode[latest.etfCode]?.secondaryCategory || ""
+    };
+  });
+  const removedEtfs = previousRows
+    .filter((previous) => !latestByEtf.has(previous.etfCode))
+    .map((previous) => ({
+      ...etfHoldingDetail(null, previous, etfByCode[previous.etfCode], numberOrNull(previous.weight), null, null),
+      primaryCategory: etfByCode[previous.etfCode]?.primaryCategory || "",
+      secondaryCategory: etfByCode[previous.etfCode]?.secondaryCategory || ""
+    }));
+  const stockName = bestEtfStockName(stockInfo?.stockCode || query, stockInfo?.stockName || details.find((row) => !isNoisyStockName(row.stockName))?.stockName || query);
+  const aggregateRow = {
+    stockCode: stockInfo?.stockCode || numericEtfStockQueryCode(query) || query,
+    stockName,
+    details
+  };
+  await enrichEtfHoldingValueRows([aggregateRow], latestDate);
+  const periodReturns = Object.fromEntries(await Promise.all(lookupPeriods.map(async (item) => {
+    const result = compareDates[item] ? await loadEtfStockPeriodReturn(aggregateRow.stockCode, compareDates[item], latestDate).catch(() => null) : null;
+    return [item, result];
+  })));
+  const latestWeights = details.map((item) => numberOrNull(item.latestWeight)).filter((value) => value != null);
+  const changes = details.map((item) => numberOrNull(item.weightChange)).filter((value) => value != null);
+  const periodSummaries = lookupPeriods.map((item) => {
+    const rows = details.map((detail) => detail.periodChanges?.[item]).filter(Boolean);
+    const periodLatestWeights = rows.map((row) => numberOrNull(row.latestWeight)).filter((value) => value != null);
+    const periodChanges = rows.map((row) => numberOrNull(row.weightChange)).filter((value) => value != null);
+    return {
+      period: item,
+      compareDate: compareDates[item] || "",
+      comparableEtfs: rows.filter((row) => numberOrNull(row.oldWeight) != null).length,
+      avgLatestWeight: average(periodLatestWeights),
+      avgWeightChange: average(periodChanges),
+      periodChangePercent: periodReturns[item]?.changePercent ?? null,
+      periodStartDate: periodReturns[item]?.startDate || "",
+      periodEndDate: periodReturns[item]?.endDate || ""
+    };
+  });
+  return {
+    stockCode: aggregateRow.stockCode,
+    stockName,
+    period: safePeriod,
+    periods: lookupPeriods,
+    latestDate,
+    compareDate,
+    periodSummaries,
+    requestedEtfs: etfs.length,
+    holdingEtfs: details.length,
+    comparableEtfs: details.filter((item) => numberOrNull(item.oldWeight) != null).length,
+    removedEtfsCount: removedEtfs.length,
+    avgLatestWeight: average(latestWeights),
+    avgWeightChange: average(changes),
+    totalHoldingValue: aggregateRow.total_holding_value ?? null,
+    holdingValueCoverageCount: aggregateRow.holding_value_coverage_count || 0,
+    holdingValueMissingCount: aggregateRow.holding_value_missing_count || 0,
+    stockTotalMarketValue: aggregateRow.stock_total_market_value ?? null,
+    stockMarketValueRatio: aggregateRow.stock_market_value_ratio ?? null,
+    periodChangePercent: periodReturns[safePeriod]?.changePercent ?? null,
+    periodStartDate: periodReturns[safePeriod]?.startDate || "",
+    periodEndDate: periodReturns[safePeriod]?.endDate || "",
+    details: details
+      .map((item) => ({ ...item, stockName: isNoisyStockName(item.stockName) ? stockName : item.stockName }))
+      .sort((a, b) => (numberOrNull(b.latestWeight) ?? -Infinity) - (numberOrNull(a.latestWeight) ?? -Infinity)),
+    removedEtfs: removedEtfs.sort((a, b) => (numberOrNull(b.oldWeight) ?? -Infinity) - (numberOrNull(a.oldWeight) ?? -Infinity))
+  };
+}
+
+function etfStockSuggestions(queryInput, limitInput = 10) {
+  const query = clean(queryInput);
+  if (!query || query.length < 2) return [];
+  const etfs = etfCategoryRowsFromDb();
+  if (!etfs.length) return [];
+  const etfCodes = etfs.map((row) => row.code);
+  const latestDate = lookupEtfSnapshotDate(etfCodes);
+  if (!latestDate) return [];
+  const placeholders = etfCodes.map(() => "?").join(",");
+  const limit = Math.max(1, Math.min(20, Number(limitInput) || 10));
+  const digits = query.replace(/\D/g, "");
+  const codeLike = `%${digits || query}%`;
+  const nameLike = `%${query}%`;
+  const exactCode = digits || query;
+  const prefixCode = `${digits || query}%`;
+  const rows = db.prepare(`
+    SELECT stockCode, stockName, COUNT(DISTINCT etfCode) AS etfCount, MAX(weight) AS maxWeight
+    FROM etf_holding_snapshots
+    WHERE snapshotDate = ?
+      AND etfCode IN (${placeholders})
+      AND (stockCode LIKE ? OR stockName LIKE ?)
+    GROUP BY stockCode
+    ORDER BY
+      CASE
+        WHEN stockCode = ? THEN 0
+        WHEN stockCode LIKE ? THEN 1
+        ELSE 2
+      END,
+      etfCount DESC,
+      maxWeight DESC,
+      stockCode ASC
+    LIMIT ?
+  `).all(latestDate, ...etfCodes, codeLike, nameLike, exactCode, prefixCode, limit);
+  return rows.map((row) => ({
+    stockCode: clean(row.stockCode),
+    stockName: bestEtfStockName(row.stockCode, row.stockName || row.stockCode),
+    etfCount: Number(row.etfCount || 0),
+    latestDate,
+    maxWeight: numberOrNull(row.maxWeight)
+  }));
+}
+
+function numericEtfStockQueryCode(query) {
+  const digits = clean(query).replace(/\D/g, "");
+  if (/^\d{5}$/.test(digits)) return digits;
+  if (/^\d{6}$/.test(digits)) return digits;
+  return "";
+}
+
+function resolveEtfHoldingStock(query, latestDate, etfCodes) {
+  const directCode = numericEtfStockQueryCode(query);
+  if (directCode) {
+    const name = latestEtfStockName(directCode, latestDate, etfCodes) || latestEtfStockName(directCode, "", etfCodes) || directCode;
+    return { stockCode: directCode, stockName: name };
+  }
+  const placeholders = etfCodes.map(() => "?").join(",");
+  const like = `%${clean(query)}%`;
+  const rows = db.prepare(`
+    SELECT stockCode, stockName, COUNT(DISTINCT etfCode) AS etfCount
+    FROM etf_holding_snapshots
+    WHERE snapshotDate = ? AND etfCode IN (${placeholders}) AND stockName LIKE ?
+    GROUP BY stockCode, stockName
+    ORDER BY etfCount DESC, stockCode ASC
+    LIMIT 1
+  `).all(latestDate, ...etfCodes, like);
+  const row = rows[0];
+  return row ? { stockCode: row.stockCode, stockName: row.stockName } : null;
+}
+
+function latestEtfStockName(stockCode, snapshotDate, etfCodes) {
+  const code = clean(stockCode);
+  if (!code || !etfCodes.length) return "";
+  const placeholders = etfCodes.map(() => "?").join(",");
+  const whereDate = snapshotDate ? "snapshotDate = ? AND" : "";
+  const params = snapshotDate ? [snapshotDate, ...etfCodes, code] : [...etfCodes, code];
+  const row = db.prepare(`
+    SELECT stockName, COUNT(DISTINCT etfCode) AS etfCount
+    FROM etf_holding_snapshots
+    WHERE ${whereDate} etfCode IN (${placeholders}) AND stockCode = ?
+    GROUP BY stockName
+    ORDER BY etfCount DESC
+    LIMIT 1
+  `).get(...params);
+  return clean(row?.stockName || "");
+}
+
+function etfStockSnapshotRows(etfCodes, snapshotDate, stockCode) {
+  if (!etfCodes.length || !snapshotDate || !stockCode) return [];
+  const placeholders = etfCodes.map(() => "?").join(",");
+  return db.prepare(`
+    SELECT etfCode, snapshotDate, stockCode, stockName, weight, shares, marketValue, source
+    FROM etf_holding_snapshots
+    WHERE snapshotDate = ? AND etfCode IN (${placeholders}) AND stockCode = ?
+  `).all(snapshotDate, ...etfCodes, stockCode);
 }
 
 function filterEtfChangeRows(rows) {
@@ -4643,10 +5557,12 @@ function emptyEtfChanges(etfs, period, message, latestDate = "") {
     requestedEtfs: etfs.length,
     latestEtfs: 0,
     compareEtfs: 0,
+    comparableEtfs: 0,
     partial: true,
+    growthThresholds: etfGrowthThresholds(period),
     coverageMessage: message,
     failures: [],
-    summary: { newStocks: [], growth5: [], growth10: [], removed: [] }
+    summary: { newStocks: [], growthStrong: [], growthLarge: [], growth5: [], growth10: [], removed: [] }
   };
 }
 
@@ -4655,6 +5571,29 @@ function latestEtfSnapshotDate(etfCodes) {
   const placeholders = etfCodes.map(() => "?").join(",");
   const row = db.prepare(`SELECT MAX(snapshotDate) AS snapshotDate FROM etf_holding_snapshots WHERE etfCode IN (${placeholders})`).get(...etfCodes);
   return row?.snapshotDate || "";
+}
+
+function lookupEtfSnapshotDate(etfCodes) {
+  if (!etfCodes.length) return "";
+  const placeholders = etfCodes.map(() => "?").join(",");
+  const rows = db.prepare(`
+    SELECT snapshotDate, COUNT(DISTINCT etfCode) AS etfCount
+    FROM etf_holding_snapshots
+    WHERE etfCode IN (${placeholders})
+    GROUP BY snapshotDate
+    ORDER BY snapshotDate DESC
+    LIMIT 20
+  `).all(...etfCodes);
+  if (!rows.length) return "";
+  const targetCount = Math.max(1, Math.ceil(etfCodes.length * ETF_DAILY_COVERAGE_TARGET));
+  const covered = rows.find((row) => Number(row.etfCount || 0) >= targetCount);
+  if (covered) return covered.snapshotDate || "";
+  rows.sort((a, b) => {
+    const diff = Number(b.etfCount || 0) - Number(a.etfCount || 0);
+    if (diff) return diff;
+    return String(b.snapshotDate || "").localeCompare(String(a.snapshotDate || ""));
+  });
+  return rows[0]?.snapshotDate || "";
 }
 
 function compareEtfSnapshotDate(etfCodes, latestDate, period) {
@@ -4679,10 +5618,6 @@ function etfSnapshotRows(etfCodes, snapshotDate) {
 
 function etfHoldingDetail(latest, previous, etf, oldWeight, latestWeight, change) {
   const row = latest || previous;
-  const status = latest && !previous ? "新进"
-    : !latest && previous ? "剔除/清仓"
-      : change > 0 ? "增加"
-        : change < 0 ? "减少" : "不变";
   return {
     stockCode: row.stockCode,
     stockName: clean(latest?.stockName || previous?.stockName || row.stockCode),
@@ -4691,8 +5626,15 @@ function etfHoldingDetail(latest, previous, etf, oldWeight, latestWeight, change
     oldWeight,
     latestWeight,
     weightChange: change,
-    status
+    status: etfHoldingStatus(latest, previous, change)
   };
+}
+
+function etfHoldingStatus(latest, previous, change) {
+  return latest && !previous ? "新进"
+    : !latest && previous ? "剔除/清仓"
+      : change > 0 ? "增加"
+        : change < 0 ? "减少" : "不变";
 }
 
 async function aggregateEtfStockChanges(entries, compareDate = "", latestDate = "") {
@@ -4723,12 +5665,152 @@ async function aggregateEtfStockChanges(entries, compareDate = "", latestDate = 
     row.period_change_percent = periodReturn.changePercent ?? null;
     row.period_start_date = periodReturn.startDate || "";
     row.period_end_date = periodReturn.endDate || "";
+    row.period_change_status = periodReturn.changePercent == null ? "行情缺失" : "";
   });
+  await enrichEtfHoldingValueRows(rows, latestDate);
   return rows.sort((a, b) => b.etf_count - a.etf_count || (numberOrNull(b.avg_weight_change) ?? -Infinity) - (numberOrNull(a.avg_weight_change) ?? -Infinity));
 }
 
 const etfStockNameCache = new Map();
 const etfStockPeriodReturnCache = new Map();
+const tushareHkTradeCalCache = new Map();
+let tushareHkDailyUnavailableUntil = 0;
+const etfAssetScaleCache = new Map();
+const etfStockMarketValueCache = new Map();
+
+async function enrichEtfHoldingValueRows(rows, latestDate) {
+  await mapWithConcurrency(rows, 5, async (row) => {
+    await mapWithConcurrency(row.details || [], 6, async (detail) => {
+      const latestWeight = numberOrNull(detail.latestWeight);
+      if (latestWeight == null) {
+        detail.holdingValue = null;
+        detail.holdingValueStatus = "缺权重";
+        return;
+      }
+      const asset = await loadEtfAssetScale(detail.etfCode, latestDate);
+      if (!asset?.assetValue) {
+        detail.holdingValue = null;
+        detail.holdingValueStatus = "缺资金口径";
+        return;
+      }
+      detail.etfAssetValue = asset.assetValue;
+      detail.etfAssetDate = asset.date || "";
+      detail.holdingValue = asset.assetValue * latestWeight / 100;
+      detail.holdingValueStatus = "";
+    });
+    const valuedDetails = (row.details || []).filter((detail) => numberOrNull(detail.holdingValue) != null);
+    const totalHoldingValue = valuedDetails.reduce((sum, detail) => sum + numberOrNull(detail.holdingValue), 0);
+    const stockMarketValue = await loadStockTotalMarketValue(row.stockCode, latestDate);
+    row.total_holding_value = valuedDetails.length ? totalHoldingValue : null;
+    row.holding_value_coverage_count = valuedDetails.length;
+    row.holding_value_missing_count = Math.max(0, (row.details || []).length - valuedDetails.length);
+    row.stock_total_market_value = stockMarketValue?.totalMarketValue ?? null;
+    row.stock_market_value_date = stockMarketValue?.date || "";
+    row.stock_market_value_ratio = totalHoldingValue > 0 && stockMarketValue?.totalMarketValue > 0
+      ? totalHoldingValue / stockMarketValue.totalMarketValue * 100
+      : null;
+    row.stock_market_value_status = row.stock_market_value_ratio == null
+      ? pcfStockMarket(row.stockCode) === "HK" ? "缺港股总市值" : "缺总市值"
+      : "";
+  });
+}
+
+async function loadEtfAssetScale(etfCode, targetDate) {
+  const code = clean(etfCode);
+  const date = clean(targetDate);
+  if (!code || !date || !TUSHARE_TOKEN) return null;
+  const cacheKey = `${code}:${date}`;
+  if (etfAssetScaleCache.has(cacheKey)) return etfAssetScaleCache.get(cacheKey);
+  const promise = fetchEtfAssetScale(code, date).catch(() => null);
+  etfAssetScaleCache.set(cacheKey, promise);
+  return promise;
+}
+
+async function fetchEtfAssetScale(etfCode, targetDate) {
+  const tsCode = tushareEtfTsCode(etfCode);
+  const [share, nav] = await Promise.all([
+    fetchLatestTushareValue("fund_share", {
+      ts_code: tsCode,
+      start_date: compactDateKey(dateKeyOffset(targetDate, -45)),
+      end_date: compactDateKey(targetDate)
+    }, "ts_code,trade_date,fd_share", "trade_date", targetDate),
+    fetchLatestTushareValue("fund_nav", {
+      ts_code: tsCode,
+      start_date: compactDateKey(dateKeyOffset(targetDate, -45)),
+      end_date: compactDateKey(targetDate)
+    }, "ts_code,ann_date,unit_nav", "ann_date", targetDate)
+  ]);
+  const shareValue = numberOrNull(share?.fd_share);
+  const unitNav = numberOrNull(nav?.unit_nav);
+  if (shareValue == null || shareValue <= 0 || unitNav == null || unitNav <= 0) return null;
+  return {
+    etfCode,
+    tsCode,
+    date: [dashDateKey(share.trade_date), dashDateKey(nav.ann_date)].filter(Boolean).sort().at(-1) || "",
+    share: shareValue,
+    unitNav,
+    assetValue: shareValue * 10000 * unitNav
+  };
+}
+
+async function loadStockTotalMarketValue(stockCode, targetDate) {
+  const code = clean(stockCode);
+  const date = clean(targetDate);
+  const market = pcfStockMarket(code);
+  if (!code || !date) return null;
+  if (!["SH", "SZ", "HK"].includes(market)) return null;
+  const cacheKey = `${market}:${code}:${date}`;
+  if (etfStockMarketValueCache.has(cacheKey)) return etfStockMarketValueCache.get(cacheKey);
+  const promise = market === "HK"
+    ? fetchEastmoneyHkTotalMarketValue(code, date).catch(() => null)
+    : TUSHARE_TOKEN ? fetchStockTotalMarketValue(code, market, date).catch(() => null) : Promise.resolve(null);
+  etfStockMarketValueCache.set(cacheKey, promise);
+  return promise;
+}
+
+async function fetchEastmoneyHkTotalMarketValue(stockCode, targetDate) {
+  const code = clean(stockCode).padStart(5, "0");
+  const secid = `116.${code}`;
+  const raw = await fetchJson(`https://push2.eastmoney.com/api/qt/stock/get?secid=${encodeURIComponent(secid)}&fields=f57,f58,f86,f116,f117,f172`, {
+    allowCurlFallback: true,
+    timeout: 8000,
+    headers: { referer: "https://quote.eastmoney.com/" }
+  });
+  const totalMvHkd = numberOrNull(raw?.data?.f116);
+  if (totalMvHkd == null || totalMvHkd <= 0) return null;
+  return {
+    stockCode: code,
+    date: dashDateKey(raw?.data?.f86) || clean(targetDate),
+    totalMarketValue: totalMvHkd * ETF_HKD_CNY_RATE,
+    originalTotalMarketValue: totalMvHkd,
+    currency: clean(raw?.data?.f172 || "HKD") || "HKD",
+    fxRate: ETF_HKD_CNY_RATE,
+    source: "eastmoney-hk-quote"
+  };
+}
+
+async function fetchStockTotalMarketValue(stockCode, market, targetDate) {
+  const row = await fetchLatestTushareValue("daily_basic", {
+    ts_code: `${clean(stockCode).padStart(6, "0")}.${market}`,
+    start_date: compactDateKey(dateKeyOffset(targetDate, -14)),
+    end_date: compactDateKey(targetDate)
+  }, "ts_code,trade_date,total_mv", "trade_date", targetDate);
+  const totalMv = numberOrNull(row?.total_mv);
+  if (totalMv == null || totalMv <= 0) return null;
+  return {
+    stockCode,
+    date: dashDateKey(row.trade_date),
+    totalMarketValue: totalMv * 10000
+  };
+}
+
+async function fetchLatestTushareValue(apiName, params, fields, dateField, targetDate) {
+  const rows = await fetchTushareApi(apiName, params, fields);
+  const target = compactDateKey(targetDate);
+  return rows
+    .filter((row) => clean(row[dateField]) && clean(row[dateField]) <= target)
+    .sort((a, b) => clean(b[dateField]).localeCompare(clean(a[dateField])))[0] || null;
+}
 
 async function loadEtfStockPeriodReturn(stockCode, compareDate, latestDate) {
   const code = clean(stockCode);
@@ -4744,6 +5826,20 @@ async function loadEtfStockPeriodReturn(stockCode, compareDate, latestDate) {
 
 async function fetchEtfStockPeriodReturn(stockCode, compareDate, latestDate) {
   const market = pcfStockMarket(stockCode);
+  if (["SH", "SZ"].includes(market) && TUSHARE_TOKEN) {
+    const tushareResult = await fetchTushareStockPeriodReturn(stockCode, market, compareDate, latestDate).catch(() => null);
+    if (tushareResult) return tushareResult;
+  }
+  if (market === "HK" && TUSHARE_TOKEN && TUSHARE_HK_DAILY_ENABLED) {
+    const tushareResult = await fetchTushareHkStockPeriodReturn(stockCode, compareDate, latestDate).catch(() => null);
+    if (tushareResult) return tushareResult;
+  }
+  const eastmoneyResult = await fetchEastmoneyStockPeriodReturn(stockCode, market, compareDate, latestDate).catch(() => null);
+  if (eastmoneyResult) return eastmoneyResult;
+  return null;
+}
+
+async function fetchEastmoneyStockPeriodReturn(stockCode, market, compareDate, latestDate) {
   const code = clean(stockCode).padStart(market === "HK" ? 5 : 6, "0");
   const secid = market === "HK" ? `116.${code}` : eastmoneySecidFromSymbol(code, market);
   if (!secid) return null;
@@ -4753,7 +5849,7 @@ async function fetchEtfStockPeriodReturn(stockCode, compareDate, latestDate) {
   const raw = await fetchEastmoneyHistoryJson(query);
   const rows = (raw?.data?.klines || []).map(parseEtfStockKlineRow).filter(Boolean);
   if (!rows.length) return null;
-  const start = lastEtfStockKlineAtOrBefore(rows, compareDate);
+  const start = lastEtfStockKlineAtOrBefore(rows, compareDate) || rows[0];
   const finish = lastEtfStockKlineAtOrBefore(rows, latestDate);
   if (!start?.close || !finish?.close || start.close <= 0) return null;
   return {
@@ -4761,8 +5857,94 @@ async function fetchEtfStockPeriodReturn(stockCode, compareDate, latestDate) {
     endDate: finish.date,
     startClose: start.close,
     endClose: finish.close,
-    changePercent: (finish.close - start.close) / start.close * 100
+    changePercent: (finish.close - start.close) / start.close * 100,
+    priceSource: market === "HK" ? "eastmoney-hk-kline" : "eastmoney-kline"
   };
+}
+
+async function fetchTushareStockPeriodReturn(stockCode, market, compareDate, latestDate) {
+  const code = clean(stockCode).padStart(6, "0");
+  const tsCode = `${code}.${market}`;
+  const rows = await fetchTushareApi("daily", {
+    ts_code: tsCode,
+    start_date: compactDateKey(dateKeyOffset(compareDate, -14)),
+    end_date: compactDateKey(latestDate)
+  }, "ts_code,trade_date,close");
+  const bars = rows.map((row) => ({
+    date: dashDateKey(row.trade_date),
+    close: numberOrNull(row.close)
+  })).filter((row) => row.date && row.close != null).sort((a, b) => a.date.localeCompare(b.date));
+  if (!bars.length) return null;
+  const start = lastEtfStockKlineAtOrBefore(bars, compareDate) || bars[0];
+  const finish = lastEtfStockKlineAtOrBefore(bars, latestDate);
+  if (!start?.close || !finish?.close || start.close <= 0) return null;
+  return {
+    startDate: start.date,
+    endDate: finish.date,
+    startClose: start.close,
+    endClose: finish.close,
+    changePercent: (finish.close - start.close) / start.close * 100,
+    priceSource: "tushare-daily"
+  };
+}
+
+async function fetchTushareHkStockPeriodReturn(stockCode, compareDate, latestDate) {
+  if (Date.now() < tushareHkDailyUnavailableUntil) return null;
+  const code = clean(stockCode).padStart(5, "0");
+  const tsCode = `${code}.HK`;
+  const startTradeDate = await nearestHkTradeDate(compareDate);
+  const endTradeDate = await nearestHkTradeDate(latestDate);
+  let rows = [];
+  try {
+    rows = await fetchTushareApi("hk_daily", {
+      ts_code: tsCode,
+      start_date: compactDateKey(dateKeyOffset(startTradeDate || compareDate, -14)),
+      end_date: compactDateKey(endTradeDate || latestDate)
+    }, "ts_code,trade_date,close");
+  } catch (error) {
+    if (isTushareRateLimitError(error)) tushareHkDailyUnavailableUntil = Date.now() + TUSHARE_HK_DAILY_COOLDOWN_MS;
+    return null;
+  }
+  const bars = rows.map((row) => ({
+    date: dashDateKey(row.trade_date),
+    close: numberOrNull(row.close)
+  })).filter((row) => row.date && row.close != null).sort((a, b) => a.date.localeCompare(b.date));
+  if (!bars.length) return null;
+  const start = lastEtfStockKlineAtOrBefore(bars, startTradeDate || compareDate) || bars[0];
+  const finish = lastEtfStockKlineAtOrBefore(bars, endTradeDate || latestDate);
+  if (!start?.close || !finish?.close || start.close <= 0) return null;
+  return {
+    startDate: start.date,
+    endDate: finish.date,
+    startClose: start.close,
+    endClose: finish.close,
+    changePercent: (finish.close - start.close) / start.close * 100,
+    priceSource: "tushare-hk-daily"
+  };
+}
+
+function isTushareRateLimitError(error) {
+  const code = clean(error?.tushareCode || error?.code);
+  const message = clean(error?.tushareMessage || error?.message);
+  return code === "40203" || /频率|频次|限频|rate/i.test(message);
+}
+
+async function nearestHkTradeDate(dateKey) {
+  const date = clean(dateKey);
+  if (!date || !TUSHARE_TOKEN) return date;
+  const compact = compactDateKey(date);
+  if (tushareHkTradeCalCache.has(compact)) return tushareHkTradeCalCache.get(compact);
+  const rows = await fetchTushareApi("hk_tradecal", {
+    start_date: compactDateKey(dateKeyOffset(date, -21)),
+    end_date: compact
+  }, "cal_date,is_open,pretrade_date").catch(() => []);
+  const openRows = rows
+    .filter((row) => Number(row.is_open) === 1 && clean(row.cal_date) <= compact)
+    .sort((a, b) => clean(b.cal_date).localeCompare(clean(a.cal_date)));
+  const direct = rows.find((row) => clean(row.cal_date) === compact);
+  const resolved = dashDateKey(openRows[0]?.cal_date || direct?.pretrade_date || compact) || date;
+  tushareHkTradeCalCache.set(compact, resolved);
+  return resolved;
 }
 
 function parseEtfStockKlineRow(line) {
@@ -4785,6 +5967,12 @@ function lastEtfStockKlineAtOrBefore(rows, dateKey) {
 function dateKeyOffset(dateKey, days) {
   const date = dateFromChinaKey(dateKey);
   return chinaDateKey(new Date(date.getTime() + Number(days || 0) * 24 * 60 * 60 * 1000));
+}
+
+function dashDateKey(value) {
+  const textValue = clean(value);
+  if (/^\d{8}$/.test(textValue)) return `${textValue.slice(0, 4)}-${textValue.slice(4, 6)}-${textValue.slice(6, 8)}`;
+  return textValue;
 }
 
 function bestEtfStockName(stockCode, fallback = "") {
@@ -5597,6 +6785,61 @@ async function handleApi(req, res, url) {
     }
   }
 
+  if (url.pathname === "/api/national-team/overview" && req.method === "GET") {
+    try {
+      return json(res, 200, { data: nationalTeamOverview(), updatedAt: nowIso(), stale: false });
+    } catch (error) {
+      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+    }
+  }
+
+  if (url.pathname === "/api/national-team/positions" && req.method === "GET") {
+    try {
+      const params = {
+        group: url.searchParams.get("group") || "",
+        holder: url.searchParams.get("holder") || "",
+        status: url.searchParams.get("status") || "",
+        query: url.searchParams.get("query") || "",
+        endDate: url.searchParams.get("endDate") || ""
+      };
+      const positions = ntFilteredPositions(params);
+      return json(res, 200, { data: { rows: ntStockSummaryRows(positions), filters: nationalTeamOverview(), positionCount: positions.length }, updatedAt: nowIso(), stale: false });
+    } catch (error) {
+      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+    }
+  }
+
+  if (url.pathname === "/api/national-team/stocks/search" && req.method === "GET") {
+    try {
+      const query = clean(url.searchParams.get("q") || url.searchParams.get("query") || "");
+      const limit = clampLimit(url.searchParams.get("limit") || 8);
+      const rows = query ? await searchStocks(query, limit).catch(() => []) : [];
+      return json(res, 200, { data: rows, updatedAt: nowIso(), stale: false });
+    } catch (error) {
+      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+    }
+  }
+
+  if (url.pathname === "/api/national-team/stock" && req.method === "GET") {
+    try {
+      return json(res, 200, { data: nationalTeamStock(url.searchParams.get("symbol") || ""), updatedAt: nowIso(), stale: false });
+    } catch (error) {
+      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+    }
+  }
+
+  if (url.pathname === "/api/national-team/refresh" && req.method === "POST") {
+    try {
+      requireAdmin(user);
+      const body = await readBody(req);
+      const data = await refreshNationalTeamSnapshots(Array.isArray(body.symbols) ? body.symbols : []);
+      return json(res, 200, { data, updatedAt: nowIso(), stale: false });
+    } catch (error) {
+      ntRecordRefreshStatus("failed", readableError(error), { finishedAt: nowIso() });
+      return json(res, error.message === "需要管理员权限" ? 403 : 400, { message: readableError(error), errorMessage: readableError(error) });
+    }
+  }
+
   if (url.pathname === "/api/etf-categories" && req.method === "GET") {
     try {
       requireAdmin(user);
@@ -5614,6 +6857,28 @@ async function handleApi(req, res, url) {
       const secondary = clean(url.searchParams.get("secondary") || "");
       const period = Number(url.searchParams.get("period") || ETF_DEFAULT_PERIOD);
       return json(res, 200, { data: await etfHoldingChanges({ primary, secondary, period }), updatedAt: nowIso(), stale: false });
+    } catch (error) {
+      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+    }
+  }
+
+  if (url.pathname === "/api/etf-holdings/stock" && req.method === "GET") {
+    try {
+      requireAdmin(user);
+      const stock = clean(url.searchParams.get("stock") || "");
+      const period = Number(url.searchParams.get("period") || ETF_DEFAULT_PERIOD);
+      return json(res, 200, { data: await etfStockHoldingLookup({ stock, period }), updatedAt: nowIso(), stale: false });
+    } catch (error) {
+      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+    }
+  }
+
+  if (url.pathname === "/api/etf-holdings/stock-suggestions" && req.method === "GET") {
+    try {
+      requireAdmin(user);
+      const query = clean(url.searchParams.get("query") || "");
+      const limit = Number(url.searchParams.get("limit") || 10);
+      return json(res, 200, { data: etfStockSuggestions(query, limit), updatedAt: nowIso(), stale: false });
     } catch (error) {
       return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
     }
@@ -6753,4 +8018,5 @@ server.listen(PORT, HOST, () => {
   if (!existsSync(dbPath)) console.log(`SQLite database will be created at ${dbPath}`);
   scheduleDailyReportTimer();
   scheduleEtfHoldingRefreshTimer();
+  scheduleNationalTeamRefreshTimer();
 });

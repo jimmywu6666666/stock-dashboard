@@ -42,7 +42,23 @@ const state = {
   etfSelectedSecondary: "",
   etfPeriod: 15,
   etfChanges: emptyEnvelope(null),
+  etfStockQuery: "",
+  etfStockSelected: null,
+  etfStockHoldings: emptyEnvelope(null),
+  etfStockSuggestions: { query: "", results: emptyEnvelope([]) },
   etfExpandedStocks: new Set(),
+  etfChangeSort: {},
+  ntOverview: emptyEnvelope(null),
+  ntPositions: emptyEnvelope({ rows: [], filters: {} }),
+  ntGroup: "",
+  ntHolder: "",
+  ntStatus: "",
+  ntEndDate: "",
+  ntQuery: "",
+  ntHasQueried: false,
+  ntSelectedSymbol: "",
+  ntStockDetail: emptyEnvelope(null),
+  ntExpandedSymbol: "",
   watchlist: [],
   adminUsers: emptyEnvelope([]),
   reportSettings: emptyEnvelope(null),
@@ -100,7 +116,8 @@ const state = {
   message: ""
 };
 
-const baseTabs = ["行情", "AI分析", "资讯", "热度", "板块", "自选股", "使用手册"];
+const baseTabs = ["行情", "AI分析", "资讯", "热度", "板块", "国家队", "自选股", "使用手册"];
+const desktopOnlyTabs = new Set(["国家队", "ETF持仓变化"]);
 const bootTaskDefinitions = [
   ["market", "核心行情"],
   ["aShareAnalysis", "A 股大盘"],
@@ -108,6 +125,7 @@ const bootTaskDefinitions = [
   ["eastmoneyNews", "东财资讯"],
   ["hotTopics", "热股/主线"],
   ["sectorSummary", "板块摘要"],
+  ["nationalTeam", "国家队"],
   ["etfCategories", "ETF 分类"],
   ["etfDailyStatus", "ETF 入库率"],
   ["watchlist", "自选股"],
@@ -116,9 +134,17 @@ const bootTaskDefinitions = [
   ["adminUsers", "管理员数据"],
   ["dsaHistory", "AI 分析历史"]
 ];
+
+function visibleBootTaskDefinitions() {
+  if (state.user?.isAdmin) return bootTaskDefinitions;
+  return bootTaskDefinitions.filter(([key]) => key !== "adminUsers");
+}
+
 const app = document.querySelector("#app");
 let stockSearchTimer = null;
 let stockSearchComposing = false;
+let etfStockSuggestTimer = null;
+let etfStockSuggestComposing = false;
 let dsaSearchTimer = null;
 let dsaSearchComposing = false;
 let dsaPollTimer = null;
@@ -174,7 +200,7 @@ function setLoading(key, value) {
 }
 
 function resetBootTasks() {
-  state.bootTasks = Object.fromEntries(bootTaskDefinitions.map(([key]) => [key, { status: "pending", message: "" }]));
+  state.bootTasks = Object.fromEntries(visibleBootTaskDefinitions().map(([key]) => [key, { status: "pending", message: "" }]));
 }
 
 function updateBootTask(key, status, message = "") {
@@ -204,6 +230,7 @@ function bootTaskHasDegraded(key) {
     eastmoneyNews: () => hasError(state.eastmoneyNews),
     hotTopics: () => hasError(state.mainlines) || hasError(state.hotStocks),
     sectorSummary: () => hasError(state.sectorFlowDates) || hasError(state.sectorRankingDates) || hasError(state.sectorFlowPreference),
+    nationalTeam: () => hasError(state.ntOverview) || hasError(state.ntPositions),
     watchlist: () => Boolean(state.message),
     posts: () => hasError(state.posts.guba),
     reportSettings: () => hasError(state.reportSettings),
@@ -1302,6 +1329,219 @@ async function loadEtfChanges(options = {}) {
   }
 }
 
+async function loadEtfStockHoldings(options = {}) {
+  const query = String(state.etfStockSelected?.stockCode || state.etfStockQuery || "").trim();
+  if (!query) {
+    state.etfStockHoldings = emptyEnvelope(null);
+    state.etfStockSuggestions = { query: "", results: emptyEnvelope([]) };
+    render();
+    return;
+  }
+  if (!state.etfStockSelected) {
+    state.etfStockHoldings = { data: null, updatedAt: new Date().toISOString(), stale: true, errorMessage: "请先从输入框候选中选择股票，再查询。" };
+    render();
+    return;
+  }
+  if (!options.silent) setLoading("etfStockHoldings", true);
+  try {
+    const params = new URLSearchParams({
+      stock: query
+    });
+    state.etfStockHoldings = await api(`/api/etf-holdings/stock?${params.toString()}`);
+  } catch (error) {
+    state.etfStockHoldings = { ...state.etfStockHoldings, stale: true, errorMessage: error.message };
+  } finally {
+    if (!options.silent) setLoading("etfStockHoldings", false);
+    else renderAfterAutoRefresh();
+  }
+}
+
+async function loadNationalTeam(options = {}) {
+  await loadNationalTeamOverview(options);
+  if (state.ntHasQueried) await loadNationalTeamPositions(options);
+}
+
+async function loadNationalTeamOverview(options = {}) {
+  if (!options.silent) setLoading("nationalTeam", true);
+  try {
+    state.ntOverview = await api("/api/national-team/overview");
+  } catch (error) {
+    state.ntOverview = { ...state.ntOverview, stale: true, errorMessage: error.message };
+  } finally {
+    if (!options.silent) setLoading("nationalTeam", false);
+    else renderAfterAutoRefresh();
+  }
+}
+
+async function loadNationalTeamPositions(options = {}) {
+  const params = new URLSearchParams();
+  if (state.ntGroup) params.set("group", state.ntGroup);
+  if (state.ntHolder) params.set("holder", state.ntHolder);
+  if (state.ntStatus) params.set("status", state.ntStatus);
+  if (state.ntEndDate) params.set("endDate", state.ntEndDate);
+  if (state.ntQuery) params.set("query", state.ntQuery);
+  if (!options.silent) setLoading("ntPositions", true);
+  try {
+    state.ntPositions = await api(`/api/national-team/positions?${params.toString()}`);
+  } catch (error) {
+    state.ntPositions = { ...state.ntPositions, stale: true, errorMessage: error.message };
+  } finally {
+    if (!options.silent) setLoading("ntPositions", false);
+    else renderAfterAutoRefresh();
+  }
+}
+
+function changeNationalTeamFilter(key, value) {
+  state[key] = value || "";
+  if (key === "ntGroup") state.ntHolder = "";
+  state.ntExpandedSymbol = "";
+  render();
+  if (state.ntHasQueried) loadNationalTeamPositions();
+}
+
+function submitNationalTeamSearch(event) {
+  event.preventDefault();
+  state.ntQuery = String(new FormData(event.target).get("query") || "").trim();
+  state.ntHasQueried = true;
+  state.ntExpandedSymbol = "";
+  loadNationalTeamPositions();
+}
+
+async function openNationalTeamStock(symbol) {
+  const cleanSymbol = String(symbol || "").trim();
+  if (!cleanSymbol) return;
+  state.ntHasQueried = true;
+  state.ntSelectedSymbol = cleanSymbol;
+  state.ntExpandedSymbol = state.ntExpandedSymbol === cleanSymbol ? "" : cleanSymbol;
+  render();
+  if (state.ntExpandedSymbol) {
+    if (!state.ntPositions.data?.rows?.some((row) => row.symbol === cleanSymbol)) {
+      await loadNationalTeamPositions({ silent: true });
+    }
+    await loadNationalTeamStock(cleanSymbol);
+  }
+}
+
+async function loadNationalTeamStock(symbol, options = {}) {
+  if (!options.silent) setLoading("ntStockDetail", true);
+  try {
+    state.ntStockDetail = await api(`/api/national-team/stock?symbol=${encodeURIComponent(symbol)}`);
+  } catch (error) {
+    state.ntStockDetail = { ...state.ntStockDetail, stale: true, errorMessage: error.message };
+  } finally {
+    if (!options.silent) setLoading("ntStockDetail", false);
+    else renderAfterAutoRefresh();
+  }
+}
+
+function clearNationalTeamFilters() {
+  state.ntGroup = "";
+  state.ntHolder = "";
+  state.ntStatus = "";
+  state.ntEndDate = "";
+  state.ntQuery = "";
+  state.ntHasQueried = false;
+  state.ntExpandedSymbol = "";
+  state.ntSelectedSymbol = "";
+  state.ntStockDetail = emptyEnvelope(null);
+  state.ntPositions = emptyEnvelope({ rows: [], filters: {} });
+  render();
+}
+
+function submitEtfStockQuery(event) {
+  event.preventDefault();
+  state.etfStockQuery = String(new FormData(event.target).get("stock") || "").trim();
+  loadEtfStockHoldings();
+}
+
+async function loadEtfStockSuggestions(queryInput, options = {}) {
+  const query = String(queryInput || "").trim();
+  if (query.length < 2) {
+    state.etfStockSuggestions = { query, results: emptyEnvelope([]) };
+    renderPreservingEtfStockInput();
+    return;
+  }
+  state.etfStockSuggestions.query = query;
+  if (options.quiet) state.loading.add("etfStockSuggestions");
+  else setLoading("etfStockSuggestions", true);
+  const requestQuery = query;
+  try {
+    const result = await api(`/api/etf-holdings/stock-suggestions?query=${encodeURIComponent(query)}&limit=10`);
+    if (state.etfStockSuggestions.query !== requestQuery) return;
+    state.etfStockSuggestions.results = result;
+  } catch (error) {
+    state.etfStockSuggestions.results = { data: [], updatedAt: new Date().toISOString(), stale: true, errorMessage: error.message };
+  } finally {
+    if (options.quiet) {
+      state.loading.delete("etfStockSuggestions");
+      if (state.etfStockSuggestions.query === requestQuery && !etfStockSuggestComposing) renderPreservingEtfStockInput();
+    } else {
+      setLoading("etfStockSuggestions", false);
+    }
+  }
+}
+
+function scheduleEtfStockSuggestions(event) {
+  const query = String(event.target.value || "").trim();
+  markSearchInput("etfStock");
+  state.etfStockQuery = query;
+  if (!state.etfStockSelected || query !== state.etfStockSelected.stockCode) state.etfStockSelected = null;
+  state.etfStockSuggestions.query = query;
+  state.etfStockSuggestions.results = query ? state.etfStockSuggestions.results : emptyEnvelope([]);
+  if (etfStockSuggestTimer) clearTimeout(etfStockSuggestTimer);
+  if (etfStockSuggestComposing || event.isComposing) return;
+  if (query.length < 2) {
+    state.etfStockSuggestions.results = emptyEnvelope([]);
+    renderPreservingEtfStockInput();
+    return;
+  }
+  etfStockSuggestTimer = setTimeout(() => loadEtfStockSuggestions(query, { quiet: true }), 220);
+}
+
+function startEtfStockSuggestComposition() {
+  etfStockSuggestComposing = true;
+  if (etfStockSuggestTimer) clearTimeout(etfStockSuggestTimer);
+}
+
+function endEtfStockSuggestComposition(event) {
+  etfStockSuggestComposing = false;
+  scheduleEtfStockSuggestions(event);
+}
+
+function chooseEtfStockSuggestion(index) {
+  const stock = state.etfStockSuggestions.results.data?.[Number(index)];
+  if (!stock) return;
+  state.etfStockQuery = stock.stockCode;
+  state.etfStockSelected = stock;
+  state.etfStockSuggestions = { query: "", results: emptyEnvelope([]) };
+  loadEtfStockHoldings();
+}
+
+function clearEtfStockLookup() {
+  state.etfStockQuery = "";
+  state.etfStockSelected = null;
+  state.etfStockSuggestions = { query: "", results: emptyEnvelope([]) };
+  state.etfStockHoldings = emptyEnvelope(null);
+  state.loading.delete("etfStockSuggestions");
+  state.loading.delete("etfStockHoldings");
+  render();
+}
+
+function renderPreservingEtfStockInput() {
+  const active = document.activeElement;
+  const shouldRestore = state.activeSearchInput === "etfStock" && active?.matches?.("[data-etf-stock-input]");
+  const selectionStart = shouldRestore ? active.selectionStart : null;
+  const selectionEnd = shouldRestore ? active.selectionEnd : null;
+  render();
+  if (!shouldRestore) return;
+  const input = document.querySelector("[data-etf-stock-input]");
+  if (!input) return;
+  input.focus();
+  if (selectionStart != null && selectionEnd != null) {
+    input.setSelectionRange(selectionStart, selectionEnd);
+  }
+}
+
 function changeEtfPrimary(value) {
   state.etfSelectedPrimary = value || "";
   state.etfSelectedSecondary = "";
@@ -1325,6 +1565,20 @@ function changeEtfPeriod(value) {
   state.etfExpandedStocks = new Set();
   render();
   loadEtfChanges();
+}
+
+function changeEtfBlockSort(kind, value) {
+  state.etfChangeSort = { ...state.etfChangeSort, [kind]: value || "default" };
+  render();
+}
+
+function clearEtfCategorySelection() {
+  state.etfSelectedPrimary = "";
+  state.etfSelectedSecondary = "";
+  state.etfExpandedStocks = new Set();
+  state.etfChanges = emptyEnvelope(null);
+  state.loading.delete("etfChanges");
+  render();
 }
 
 async function refreshEtfHoldings() {
@@ -1556,6 +1810,7 @@ async function refreshAll(options = {}) {
     loadEnvelope("mainlines", "/api/mainlines?limit=30"),
     loadEnvelope("hotStocks", "/api/hot-stocks?limit=10"),
     loadSectorSummary({ silent: true }),
+    loadNationalTeam({ silent: true }),
     loadEtfCategories({ silent: true }),
     loadEtfDailyStatus({ silent: true }),
     loadWatchlist(),
@@ -1585,6 +1840,7 @@ async function refreshAllWithBootProgress(options = {}) {
       ]);
     }),
     runBootTask("sectorSummary", () => loadSectorSummary({ silent: true })),
+    runBootTask("nationalTeam", () => state.user?.isAdmin ? loadNationalTeam({ silent: true }) : Promise.resolve()),
     runBootTask("etfCategories", () => loadEtfCategories({ silent: true })),
     runBootTask("etfDailyStatus", () => loadEtfDailyStatus({ silent: true })),
     runBootTask("posts", () => state.selectedSymbol ? loadPosts(state.selectedSymbol) : Promise.resolve()),
@@ -1619,6 +1875,7 @@ function isUserReadingOrEditing() {
     || state.openHoldingId
     || state.activeTab === "AI分析"
     || state.activeTab === "板块"
+    || state.activeTab === "国家队"
     || state.activeTab === "ETF持仓变化"
     || state.activeTab === "使用手册"
     || state.activeTab === "管理"
@@ -2005,6 +2262,10 @@ function isSmallScreenViewport() {
   return window.matchMedia("(max-width: 900px)").matches;
 }
 
+function effectiveActiveTab() {
+  return isSmallScreenViewport() && desktopOnlyTabs.has(state.activeTab) ? "行情" : state.activeTab;
+}
+
 function updateBodyMode() {
   document.body.classList.toggle("big-screen-body", Boolean(state.authed && !state.booting && isBigScreenRoute()));
 }
@@ -2069,7 +2330,7 @@ function shouldShowBootscreen() {
 }
 
 function bootTemplate() {
-  const tasks = bootTaskDefinitions.map(([key, label]) => ({ key, label, ...(state.bootTasks[key] || { status: "pending", message: "" }) }));
+  const tasks = visibleBootTaskDefinitions().map(([key, label]) => ({ key, label, ...(state.bootTasks[key] || { status: "pending", message: "" }) }));
   const finished = tasks.filter((task) => task.status === "done" || task.status === "degraded").length;
   const degraded = tasks.filter((task) => task.status === "degraded").length;
   const active = tasks.find((task) => task.status === "loading");
@@ -2296,7 +2557,29 @@ function bindEvents() {
   document.querySelectorAll("[data-etf-primary]").forEach((el) => el.addEventListener("change", () => changeEtfPrimary(el.value)));
   document.querySelectorAll("[data-etf-secondary]").forEach((el) => el.addEventListener("change", () => changeEtfSecondary(el.value)));
   document.querySelectorAll("[data-etf-period]").forEach((el) => el.addEventListener("change", () => changeEtfPeriod(el.value)));
+  document.querySelectorAll("[data-etf-category-clear]").forEach((el) => el.addEventListener("click", clearEtfCategorySelection));
+  document.querySelectorAll("[data-etf-block-sort]").forEach((el) => el.addEventListener("change", () => changeEtfBlockSort(el.dataset.etfBlockSort, el.value)));
+  document.querySelectorAll("[data-etf-stock-query-form]").forEach((el) => el.addEventListener("submit", submitEtfStockQuery));
+  document.querySelectorAll("[data-etf-stock-input]").forEach((el) => {
+    el.addEventListener("input", scheduleEtfStockSuggestions);
+    el.addEventListener("compositionstart", startEtfStockSuggestComposition);
+    el.addEventListener("compositionend", endEtfStockSuggestComposition);
+    el.addEventListener("focus", () => {
+      markSearchInput("etfStock");
+      const query = String(el.value || "").trim();
+      if (query.length >= 2 && state.etfStockSuggestions.query !== query) {
+        state.etfStockQuery = query;
+        loadEtfStockSuggestions(query, { quiet: true });
+      }
+    });
+  });
+  document.querySelectorAll("[data-etf-stock-suggest]").forEach((el) => el.addEventListener("click", () => chooseEtfStockSuggestion(el.dataset.etfStockSuggest)));
+  document.querySelectorAll("[data-etf-stock-clear]").forEach((el) => el.addEventListener("click", clearEtfStockLookup));
   document.querySelectorAll("[data-etf-stock-toggle]").forEach((el) => el.addEventListener("click", () => toggleEtfStock(el.dataset.etfStockToggle)));
+  document.querySelectorAll("[data-nt-filter]").forEach((el) => el.addEventListener("change", () => changeNationalTeamFilter(el.dataset.ntFilter, el.value)));
+  document.querySelectorAll("[data-nt-search-form]").forEach((el) => el.addEventListener("submit", submitNationalTeamSearch));
+  document.querySelectorAll("[data-nt-clear]").forEach((el) => el.addEventListener("click", clearNationalTeamFilters));
+  document.querySelectorAll("[data-nt-stock]").forEach((el) => el.addEventListener("click", () => openNationalTeamStock(el.dataset.ntStock)));
   document.querySelectorAll("[data-close-detail]").forEach((el) => el.addEventListener("click", closeDetail));
   const stockDetailContent = document.querySelector(".stock-detail-content");
   if (stockDetailContent) {
@@ -2479,6 +2762,8 @@ function unlockBodyScroll(top = state.pageScrollTop || 0) {
 
 function switchTab(tab) {
   if (!tab || state.activeTab === tab) return;
+  if ((tab === "ETF持仓变化" || tab === "管理") && !state.user?.isAdmin) return;
+  if (isSmallScreenViewport() && desktopOnlyTabs.has(tab)) return;
   if (state.activeTab === "板块") stopSectorReplay();
   state.activeTab = tab;
   state.lockedPageScrollTop = 0;
@@ -2489,6 +2774,7 @@ function switchTab(tab) {
   render();
   if (tab === "板块" && !state.sectorRanking.data && !state.loading.has("sectorRanking")) loadSectorRankingOnly();
   if (tab === "板块" && state.sectorMode === "flow" && !state.sectorFlow.data && !state.loading.has("sectorFlow")) ensureSectorFlowLoaded();
+  if (tab === "国家队" && !state.ntOverview.data && !state.loading.has("nationalTeam")) loadNationalTeam();
   if (tab === "ETF持仓变化") {
     if (!state.etfCategories.data?.categories?.length && !state.loading.has("etfCategories")) loadEtfCategories();
     if (!state.etfDailyStatus.data && !state.loading.has("etfDailyStatus")) loadEtfDailyStatus();
@@ -2556,6 +2842,8 @@ function registerTemplate() {
 
 function dashboardTemplate() {
   const tabs = state.user?.isAdmin ? [...baseTabs, "ETF持仓变化", "管理"] : baseTabs;
+  const mobileTabs = tabs.filter((tab) => !desktopOnlyTabs.has(tab));
+  const activeTab = effectiveActiveTab();
   return `
     <div class="app-shell">
       <header class="topbar">
@@ -2577,7 +2865,7 @@ function dashboardTemplate() {
       ${appUpdateTemplate()}
 
       <nav class="mobile-tabs">
-        ${tabs.map((tab) => `<button class="${state.activeTab === tab ? "active" : ""}" data-tab="${tab}">${tab}</button>`).join("")}
+        ${mobileTabs.map((tab) => `<button class="${activeTab === tab ? "active" : ""}" data-tab="${tab}">${tab}</button>`).join("")}
       </nav>
 
       ${state.message ? `<p class="banner">${escapeHtml(state.message)}</p>` : ""}
@@ -2632,6 +2920,11 @@ function dashboardTemplate() {
         <section class="panel sector-feature-panel mobile-section ${mobileVisible("板块")}">
           ${sectionTitle("板块", state.sectorMode === "flow" ? state.sectorFlow : state.sectorRanking, state.sectorMode === "flow" ? "sectorFlow" : "sectorRanking")}
           ${sectorFeatureTemplate()}
+        </section>
+
+        <section class="panel national-team-panel mobile-section ${mobileVisible("国家队")}">
+          ${sectionTitle("国家队持仓透视", state.ntOverview.data ? state.ntOverview : state.ntPositions, "nationalTeam")}
+          ${nationalTeamTemplate()}
         </section>
 
         ${state.user?.isAdmin ? `
@@ -4142,6 +4435,331 @@ function mainlineItem(item) {
   `;
 }
 
+function nationalTeamTemplate() {
+  const overview = state.ntOverview.data || {};
+  const payload = state.ntPositions.data || {};
+  const rows = payload.rows || [];
+  const filters = { ...overview, ...(payload.filters || {}) };
+  const hasQuery = Boolean(state.ntHasQueried);
+  return `
+    ${nationalTeamStatusTemplate(overview)}
+    ${nationalTeamSummaryTemplate(overview)}
+    <section class="nt-workbench">
+      <header class="etf-section-head">
+        <div>
+          <strong>公开持仓雷达</strong>
+          <small>基于公开季报/年报持仓快照；成本为前 90 日 VWAP 折价估算，缺窗口时用后续首个交易窗口兜底。</small>
+        </div>
+      </header>
+      ${nationalTeamToolbarTemplate(filters)}
+      ${state.ntPositions.errorMessage ? `<p class="warning">${escapeHtml(state.ntPositions.errorMessage)}</p>` : ""}
+      ${hasQuery && state.loading.has("ntPositions") && !rows.length ? `<div class="chart-empty">持仓数据读取中...</div>` : ""}
+      ${hasQuery && rows.length ? nationalTeamTableTemplate(rows) : ""}
+      ${hasQuery && !state.loading.has("ntPositions") && !rows.length ? emptyState(overview.configured === false ? "未配置 TUSHARE_TOKEN，暂无国家队缓存数据" : "未找到符合条件的持仓记录") : ""}
+    </section>
+  `;
+}
+
+function nationalTeamStatusTemplate(overview) {
+  const status = overview.refreshStatus;
+  const isWarning = overview.configured === false || status?.status === "failed";
+  const pieces = [];
+  if (overview.configured === false) pieces.push("Tushare 未配置");
+  if (status?.status && isWarning) pieces.push(`刷新状态：${status.status}`);
+  if (status?.finishedAt) pieces.push(`数据检查 ${formatDateTime(status.finishedAt)}`);
+  if (status?.message) pieces.push(status.message);
+  if (!pieces.length) return "";
+  return `<p class="nt-status-line ${isWarning ? "warning" : ""}">${pieces.map(escapeHtml).join(" · ")}</p>`;
+}
+
+function nationalTeamSummaryTemplate(overview) {
+  const weighted = overview.weightedProfitRate == null ? "--" : formatPercent(overview.weightedProfitRate * 100);
+  return `
+    <div class="nt-kpi-strip">
+      <span>当前股票 <strong>${formatCount(overview.totalCount)}</strong><em>机构持仓 ${formatCount(overview.positionCount)}</em></span>
+      <span>估算市值 <strong>${formatChineseAmount(overview.totalValue)}</strong><em>加仓/新进 ${formatCount(overview.addCount)}</em></span>
+      <span>盈利/被套 <strong>${formatCount(overview.profitCount)} / ${formatCount(overview.trappedCount)}</strong><em>减仓 ${formatCount(overview.reduceCount)}</em></span>
+      <span>持仓收益率 <strong class="${trendClass(overview.weightedProfitRate)}">${weighted}</strong><em>按市值加权</em></span>
+    </div>
+    ${nationalTeamTopTemplate(overview.topPositions || [])}
+  `;
+}
+
+function nationalTeamTopTemplate(rows) {
+  if (!rows.length) return "";
+  return `
+    <div class="nt-top-chips-row">
+      <div class="nt-top-chips">
+        <span class="nt-top-label">重仓 Top 股票</span>
+        ${rows.slice(0, 8).map((row) => `
+          <button type="button" data-nt-stock="${escapeAttr(row.symbol)}">
+            <strong>${escapeHtml(row.name || row.symbol)}</strong>
+            <span>${formatChineseAmount(row.positionValue)}</span>
+          </button>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function nationalTeamToolbarTemplate(filters) {
+  const groups = filters.groupsAvailable || [];
+  const holders = (filters.holders || []).filter((holder) => !state.ntGroup || nationalTeamGroupForHolder(holder) === state.ntGroup);
+  const statuses = filters.statuses || [];
+  const endDates = filters.endDates || [];
+  const canClear = Boolean(state.ntGroup || state.ntHolder || state.ntStatus || state.ntEndDate || state.ntQuery || state.ntHasQueried || state.ntPositions.data?.rows?.length);
+  return `
+    <div class="etf-toolbar nt-toolbar">
+      <label>
+        <span>机构分组</span>
+        <select data-nt-filter="ntGroup">
+          <option value="" ${!state.ntGroup ? "selected" : ""}>全部分组</option>
+          ${groups.map((item) => `<option value="${escapeAttr(item)}" ${state.ntGroup === item ? "selected" : ""}>${escapeHtml(item)}</option>`).join("")}
+        </select>
+      </label>
+      <label>
+        <span>机构名称</span>
+        <select data-nt-filter="ntHolder">
+          <option value="" ${!state.ntHolder ? "selected" : ""}>全部机构</option>
+          ${holders.map((item) => `<option value="${escapeAttr(item)}" ${state.ntHolder === item ? "selected" : ""}>${escapeHtml(item)}</option>`).join("")}
+        </select>
+      </label>
+      <label>
+        <span>盈亏状态</span>
+        <select data-nt-filter="ntStatus">
+          <option value="" ${!state.ntStatus ? "selected" : ""}>全部状态</option>
+          ${statuses.map((item) => `<option value="${escapeAttr(item)}" ${state.ntStatus === item ? "selected" : ""}>${escapeHtml(item)}</option>`).join("")}
+        </select>
+      </label>
+      <label>
+        <span>报告期</span>
+        <select data-nt-filter="ntEndDate">
+          <option value="" ${!state.ntEndDate ? "selected" : ""}>全部报告期</option>
+          ${endDates.map((item) => `<option value="${escapeAttr(item)}" ${state.ntEndDate === item ? "selected" : ""}>${escapeHtml(item)}</option>`).join("")}
+        </select>
+      </label>
+      <form class="nt-search-form" data-nt-search-form>
+        <input name="query" value="${escapeAttr(state.ntQuery)}" placeholder="代码/名称/机构" />
+        <button type="submit">查询</button>
+      </form>
+      ${canClear ? `<button type="button" class="etf-toolbar-clear" data-nt-clear>清空</button>` : ""}
+    </div>
+  `;
+}
+
+function nationalTeamGroupForHolder(holder) {
+  const text = String(holder || "");
+  if (/中央汇金|汇金资产|中国证券金融|证金/.test(text)) return "国家队核心";
+  if (/全国社保基金|社保基金/.test(text)) return "社保基金";
+  if (/基本养老保险基金/.test(text)) return "养老金";
+  if (/国新投资|国家集成电路|梧桐树投资/.test(text)) return "战略投资";
+  return "其他";
+}
+
+function nationalTeamTableTemplate(rows) {
+  return `
+    <div class="nt-table-wrap">
+      <table class="nt-table">
+        <thead>
+          <tr>
+            <th>股票</th>
+            <th>机构概览</th>
+            <th>状态</th>
+            <th>均价/现价</th>
+            <th>综合盈亏</th>
+            <th>合计持股</th>
+            <th>合计市值</th>
+            <th>变动概览</th>
+            <th>最新报告期</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(nationalTeamRowTemplate).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function nationalTeamRowTemplate(row) {
+  const active = state.ntExpandedSymbol === row.symbol;
+  const trend = row.profitRate == null ? "flat" : row.profitRate >= 0 ? "up-text" : "down-text";
+  const holderGroups = row.holderGroups?.length ? row.holderGroups.join(" / ") : row.holderGroup || "--";
+  return `
+    <tr class="${active ? "active" : ""}">
+      <td>
+        <button type="button" class="nt-stock-button ${active ? "expanded" : ""}" data-nt-stock="${escapeAttr(row.symbol)}" title="${active ? "收起机构明细" : "展开机构明细"}">
+          <span class="nt-expand-cue" aria-hidden="true">${active ? "⌃" : "⌄"}</span>
+          <span class="nt-stock-label">
+            <strong>${escapeHtml(row.name || row.symbol)}</strong>
+            <span>${escapeHtml(row.symbol)} · ${active ? "收起" : "展开"}</span>
+          </span>
+        </button>
+      </td>
+      <td><span class="nt-holder"><strong>${formatCount(row.holderCount)} 家机构</strong><em>${escapeHtml(holderGroups)}</em></span></td>
+      <td><span class="nt-status ${escapeAttr(row.status)}">${escapeHtml(row.status || "未知")}</span></td>
+      <td><span class="nt-price-pair"><b>${formatNumber(row.estCost)}</b><em>${formatNumber(row.currPrice)}</em></span></td>
+      <td><strong class="${trend}">${row.profitRate == null ? "--" : formatPercent(row.profitRate * 100)}</strong></td>
+      <td>${formatCompactVolume(numberOrNull(row.holdAmount) || 0)}</td>
+      <td>${formatChineseAmount(row.positionValue)}</td>
+      <td>${nationalTeamChangeOverviewTemplate(row)}</td>
+      <td>${escapeHtml(row.endDate || "--")}</td>
+    </tr>
+    ${active ? `<tr class="nt-detail-row"><td colspan="9">${nationalTeamStockDetailTemplate(row.symbol, row)}</td></tr>` : ""}
+  `;
+}
+
+function nationalTeamChangeOverviewTemplate(row) {
+  const text = String(row?.changeText || "--");
+  if (!text || text === "--") return "--";
+  const parts = text.split(" | ");
+  const lead = parts.shift() || "--";
+  const direction = row?.netChangeDirection || "";
+  const leadClass = direction === "add" ? "up-text" : direction === "reduce" ? "down-text" : "flat";
+  return `
+    <span class="nt-change-overview">
+      <strong class="${escapeAttr(leadClass)}">${escapeHtml(lead)}</strong>
+      ${parts.length ? `<em>${parts.map(escapeHtml).join(" | ")}</em>` : ""}
+    </span>
+  `;
+}
+
+function nationalTeamStockDetailTemplate(symbol, summaryRow = null) {
+  const envelope = state.ntStockDetail;
+  const data = envelope.data;
+  const summaryPositions = summaryRow?.positions || [];
+  if (state.loading.has("ntStockDetail") && (!data || data.symbol !== symbol)) {
+    return `
+      ${summaryPositions.length ? nationalTeamInstitutionDetailTemplate(summaryPositions) : ""}
+      <div class="chart-empty">单股详情读取中...</div>
+    `;
+  }
+  if (envelope.errorMessage) return `<p class="warning">${escapeHtml(envelope.errorMessage)}</p>`;
+  if (!data || data.symbol !== symbol) {
+    return `
+      ${summaryPositions.length ? nationalTeamInstitutionDetailTemplate(summaryPositions) : ""}
+      <div class="chart-empty">点击后读取详情...</div>
+    `;
+  }
+  const positions = summaryPositions.length ? summaryPositions : data.positions || [];
+  const history = data.history || [];
+  return `
+    ${nationalTeamInstitutionDetailTemplate(positions)}
+    <div class="nt-detail-grid">
+      <section class="stock-kline nt-kline">
+        <header>
+          <div>
+            <strong>${escapeHtml(data.name || data.symbol)} 成本线</strong>
+            <span>${escapeHtml(data.symbol)}</span>
+          </div>
+        </header>
+        ${nationalTeamMiniChart(data)}
+      </section>
+      <section class="nt-history-panel">
+        <header>
+          <strong>报告期轨迹</strong>
+          <span>${positions.length} 个最新机构持仓</span>
+        </header>
+        <ol>
+          ${history.map((item) => `
+            <li>
+              <span><strong>${escapeHtml(item.holderName)}</strong><em>${escapeHtml(item.endDate)} · ${escapeHtml(item.holderGroup)}</em></span>
+              <b>${formatCompactVolume(numberOrNull(item.holdAmount) || 0)}</b>
+            </li>
+          `).join("") || emptyState("暂无历史快照")}
+        </ol>
+      </section>
+    </div>
+  `;
+}
+
+function nationalTeamInstitutionDetailTemplate(positions = []) {
+  return `
+    <section class="nt-institution-panel">
+      <header>
+        <strong>机构明细</strong>
+        <span>${formatCount(positions.length)} 条最新持仓</span>
+      </header>
+      <div class="nt-institution-table-wrap">
+        <table class="nt-institution-table">
+          <thead>
+            <tr>
+              <th>机构</th>
+              <th>分组</th>
+              <th>状态</th>
+              <th>成本/现价</th>
+              <th>盈亏率</th>
+              <th>持股</th>
+              <th>市值</th>
+              <th>较上期变动</th>
+              <th>报告期</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${positions.map((item) => {
+              const trend = item.profitRate == null ? "flat" : item.profitRate >= 0 ? "up-text" : "down-text";
+              return `
+                <tr>
+                  <td><span class="nt-holder"><strong>${escapeHtml(item.holderName)}</strong></span></td>
+                  <td>${escapeHtml(item.holderGroup || "--")}</td>
+                  <td><span class="nt-status ${escapeAttr(item.status)}">${escapeHtml(item.status || "未知")}</span></td>
+                  <td><span class="nt-price-pair"><b>${formatNumber(item.estCost)}</b><em>${formatNumber(item.currPrice)}</em></span></td>
+                  <td><strong class="${trend}">${item.profitRate == null ? "--" : formatPercent(item.profitRate * 100)}</strong></td>
+                  <td>${formatCompactVolume(numberOrNull(item.holdAmount) || 0)}</td>
+                  <td>${formatChineseAmount(item.positionValue)}</td>
+                  <td>${escapeHtml(item.changeText || "--")}</td>
+                  <td>${escapeHtml(item.endDate || "--")}</td>
+                </tr>
+              `;
+            }).join("") || `<tr><td colspan="9">${emptyState("暂无机构明细")}</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+function nationalTeamMiniChart(data) {
+  const rows = data.bars || [];
+  const positions = data.positions || [];
+  if (!rows.length) return `<div class="chart-empty">暂无 K 线缓存</div>`;
+  const width = 760;
+  const height = 260;
+  const left = 46;
+  const right = 14;
+  const top = 18;
+  const bottom = 28;
+  const chartWidth = width - left - right;
+  const chartHeight = height - top - bottom;
+  const costs = positions.map((item) => numberOrNull(item.estCost)).filter((item) => item != null);
+  const prices = rows.flatMap((row) => [row.high, row.low, row.close]).filter((item) => item != null).concat(costs);
+  const minRaw = Math.min(...prices);
+  const maxRaw = Math.max(...prices);
+  const pad = Math.max((maxRaw - minRaw) * 0.08, maxRaw * 0.003, 0.01);
+  const min = minRaw - pad;
+  const max = maxRaw + pad;
+  const xFor = (index) => left + (rows.length <= 1 ? chartWidth / 2 : index / (rows.length - 1) * chartWidth);
+  const yFor = (value) => top + ((max - value) / Math.max(max - min, 0.01)) * chartHeight;
+  const line = rows.map((row, index) => `${xFor(index).toFixed(1)},${yFor(row.close).toFixed(1)}`).join(" ");
+  const costLines = costs.slice(0, 4).map((cost, index) => {
+    const y = yFor(cost);
+    return `<line class="nt-cost-line" x1="${left}" y1="${y.toFixed(1)}" x2="${width - right}" y2="${y.toFixed(1)}" /><text class="chart-axis" x="${width - 118}" y="${(y - 4 - index * 2).toFixed(1)}">成本 ${formatChartPrice(cost)}</text>`;
+  }).join("");
+  const labels = chartLabelIndexes(rows.length);
+  return `
+    <svg class="stock-chart-svg nt-chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeAttr(data.name || data.symbol)} 国家队成本线">
+      <rect class="chart-bg" x="0" y="0" width="${width}" height="${height}" />
+      <line class="chart-grid" x1="${left}" y1="${top}" x2="${width - right}" y2="${top}" />
+      <line class="chart-grid" x1="${left}" y1="${height - bottom}" x2="${width - right}" y2="${height - bottom}" />
+      <text class="chart-axis" x="8" y="${top + 4}">${formatChartPrice(max)}</text>
+      <text class="chart-axis" x="8" y="${height - bottom}">${formatChartPrice(min)}</text>
+      <polyline class="chart-line" points="${line}" />
+      ${costLines}
+      ${labels.map((index) => `<text class="chart-x-label" x="${xFor(index).toFixed(1)}" y="${height - 5}">${escapeHtml(String(rows[index]?.date || "").slice(5))}</text>`).join("")}
+    </svg>
+  `;
+}
+
 function etfHoldingsTemplate() {
   const categories = state.etfCategories.data?.categories || [];
   if (state.loading.has("etfCategories") && !categories.length) return `<div class="card-loading">ETF 分类加载中...</div>`;
@@ -4155,41 +4773,185 @@ function etfHoldingsTemplate() {
   const secondaries = primary?.secondaries || [];
   const secondary = secondaries.find((item) => item.name === state.etfSelectedSecondary);
   const data = state.etfChanges.data;
+  const canClearCategory = Boolean(primary || secondary || data || state.etfChanges.errorMessage);
   return `
-    <div class="etf-toolbar">
-      <label>
-        <span>一级分类</span>
-        <select data-etf-primary>
-          <option value="" ${!primary ? "selected" : ""}>请选择一级分类</option>
-          ${categories.map((item) => `<option value="${escapeAttr(item.name)}" ${item.name === primary?.name ? "selected" : ""}>${escapeHtml(item.name)}（${item.count}）</option>`).join("")}
-        </select>
-      </label>
-      <label>
-        <span>二级分类</span>
-        <select data-etf-secondary ${primary ? "" : "disabled"}>
-          <option value="" ${!secondary ? "selected" : ""}>${primary ? "请选择二级分类" : "先选择一级分类"}</option>
-          ${secondaries.map((item) => `<option value="${escapeAttr(item.name)}" ${item.name === secondary?.name ? "selected" : ""}>${escapeHtml(item.name)}（${item.count}）</option>`).join("")}
-        </select>
-      </label>
-      <label>
-        <span>对比周期</span>
-        <select data-etf-period>
-          ${[5, 10, 15, 30].map((period) => `<option value="${period}" ${Number(state.etfPeriod) === period ? "selected" : ""}>${period} 个交易日</option>`).join("")}
-        </select>
-      </label>
-    </div>
     ${etfDailyStatusTemplate()}
-    ${state.etfChanges.errorMessage ? `<p class="warning">${escapeHtml(state.etfChanges.errorMessage)}</p>` : ""}
-    ${etfCoverageTemplate(data, secondary)}
-    ${state.loading.has("etfChanges") && !data ? `<div class="chart-empty">统计加载中...</div>` : ""}
-    ${data ? `
-      <div class="etf-change-grid">
-        ${etfChangeBlock("新进股票", "newStocks", data.summary?.newStocks || [])}
-        ${etfChangeBlock("权重增加 ≥5 个百分点", "growth5", data.summary?.growth5 || [])}
-        ${etfChangeBlock("权重增加 ≥10 个百分点", "growth10", data.summary?.growth10 || [])}
+    ${etfStockLookupTemplate()}
+    <section class="etf-category-panel">
+      <header class="etf-section-head">
+        <div>
+          <strong>分类 ETF 持仓变化统计</strong>
+          <small>按一级/二级行业筛选 ETF，统计新进、明显加仓和大幅加仓股票。</small>
+        </div>
+      </header>
+      <div class="etf-toolbar">
+        <label>
+          <span>一级分类</span>
+          <select data-etf-primary>
+            <option value="" ${!primary ? "selected" : ""}>请选择一级分类</option>
+            ${categories.map((item) => `<option value="${escapeAttr(item.name)}" ${item.name === primary?.name ? "selected" : ""}>${escapeHtml(item.name)}（${item.count}）</option>`).join("")}
+          </select>
+        </label>
+        <label>
+          <span>二级分类</span>
+          <select data-etf-secondary ${primary ? "" : "disabled"}>
+            <option value="" ${!secondary ? "selected" : ""}>${primary ? "请选择二级分类" : "先选择一级分类"}</option>
+            ${secondaries.map((item) => `<option value="${escapeAttr(item.name)}" ${item.name === secondary?.name ? "selected" : ""}>${escapeHtml(item.name)}（${item.count}）</option>`).join("")}
+          </select>
+        </label>
+        <label>
+          <span>对比周期</span>
+          <select data-etf-period>
+            ${[5, 10, 15, 30].map((period) => `<option value="${period}" ${Number(state.etfPeriod) === period ? "selected" : ""}>${period} 个交易日</option>`).join("")}
+          </select>
+        </label>
+        ${canClearCategory ? `<button type="button" class="etf-toolbar-clear" data-etf-category-clear>清空</button>` : ""}
       </div>
-    ` : emptyState("请选择一级分类和二级分类")}
+      ${state.etfChanges.errorMessage ? `<p class="warning">${escapeHtml(state.etfChanges.errorMessage)}</p>` : ""}
+      ${etfCoverageTemplate(data, secondary)}
+      ${state.loading.has("etfChanges") && !data ? `<div class="chart-empty">统计加载中...</div>` : ""}
+      ${data ? `
+        <div class="etf-change-grid">
+          ${etfChangeBlock("新进股票", "newStocks", data.summary?.newStocks || [])}
+          ${etfChangeBlock(`明显加仓 ≥${escapeHtml(data.growthThresholds?.strong ?? 5)} 个百分点`, "growthStrong", data.summary?.growthStrong || data.summary?.growth5 || [])}
+          ${etfChangeBlock(`大幅加仓 ≥${escapeHtml(data.growthThresholds?.large ?? 10)} 个百分点`, "growthLarge", data.summary?.growthLarge || data.summary?.growth10 || [])}
+        </div>
+      ` : emptyState("请选择一级分类和二级分类")}
+    </section>
   `;
+}
+
+function etfStockLookupTemplate() {
+  const data = state.etfStockHoldings.data;
+  const suggestions = state.etfStockSuggestions.results.data || [];
+  const suggestError = state.etfStockSuggestions.results.errorMessage;
+  const showSuggestions = state.etfStockSuggestions.query && (suggestions.length || state.loading.has("etfStockSuggestions") || suggestError);
+  const selected = state.etfStockSelected;
+  const canQuery = Boolean(selected) && !state.loading.has("etfStockHoldings");
+  const canClear = Boolean(state.etfStockQuery || selected || data || state.etfStockHoldings.errorMessage || suggestions.length);
+  return `
+    <section class="etf-stock-lookup">
+      <header class="etf-section-head">
+        <div>
+          <strong>个股 ETF 持仓查询</strong>
+          <small>先从候选中选定股票，再查看该股被哪些行业 ETF 持有。</small>
+        </div>
+      </header>
+      <form class="etf-stock-lookup-form" data-etf-stock-query-form>
+        <label>
+          <span>股票代码/名称</span>
+          <input name="stock" data-etf-stock-input autocomplete="off" value="${escapeAttr(state.etfStockQuery || "")}" placeholder="输入股票代码/名称，如 688525、01801、宁德时代" />
+        </label>
+        <button type="submit" ${canQuery ? "" : "disabled"}>${state.loading.has("etfStockHoldings") ? "查询中" : "查询"}</button>
+        ${canClear ? `<button type="button" class="ghost-button" data-etf-stock-clear>清空</button>` : ""}
+      </form>
+      ${showSuggestions ? etfStockSuggestionList(suggestions, suggestError) : selected ? `<p class="etf-stock-hint etf-stock-selected">已选择：${escapeHtml(selected.stockName || selected.stockCode)}（${escapeHtml(selected.stockCode)}），${escapeHtml(selected.etfCount || 0)} 只ETF持有。</p>` : `<p class="etf-stock-hint">必须从候选中选择股票后才能查询，避免代码或名称输错。</p>`}
+      ${state.etfStockHoldings.errorMessage ? `<p class="warning">${escapeHtml(state.etfStockHoldings.errorMessage)}</p>` : ""}
+      ${state.loading.has("etfStockHoldings") && !data ? `<div class="chart-empty">个股 ETF 持仓查询中...</div>` : ""}
+      ${data ? etfStockLookupResult(data) : ""}
+    </section>
+  `;
+}
+
+function etfStockSuggestionList(suggestions, errorMessage) {
+  if (errorMessage) return `<p class="warning">${escapeHtml(errorMessage)}</p>`;
+  if (state.loading.has("etfStockSuggestions") && !suggestions.length) {
+    return `<div class="etf-stock-suggestions"><span class="etf-stock-suggest-empty">正在匹配股票代码和名称...</span></div>`;
+  }
+  if (!suggestions.length) {
+    return `<div class="etf-stock-suggestions"><span class="etf-stock-suggest-empty">没有匹配到当前 ETF 池最新持仓里的股票</span></div>`;
+  }
+  return `
+    <div class="etf-stock-suggestions">
+      ${suggestions.map((item, index) => `
+        <button type="button" class="etf-stock-suggest" data-etf-stock-suggest="${index}">
+          <strong>${escapeHtml(item.stockName || item.stockCode)}</strong>
+          <span>${escapeHtml(item.stockCode)}</span>
+          <small>最新 ${escapeHtml(item.latestDate || "--")} · ${escapeHtml(item.etfCount || 0)} 只ETF持有${item.maxWeight == null ? "" : ` · 最高 ${formatPercent(item.maxWeight)}`}</small>
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function etfStockLookupResult(data) {
+  const details = data.details || [];
+  const periodSummaries = data.periodSummaries || [];
+  return `
+    <div class="etf-stock-result">
+      <header>
+        <div>
+          <strong>${escapeHtml(data.stockName || data.stockCode)}</strong>
+          <small>${escapeHtml(data.stockCode || "")} · 最新 ${escapeHtml(data.latestDate || "--")} · 四周期对比</small>
+        </div>
+        <span class="etf-block-count"><b>${escapeHtml(data.holdingEtfs || 0)}</b> 只ETF持有</span>
+      </header>
+      <div class="etf-card-metrics etf-stock-summary-metrics">
+        <span class="etf-card-metric"><small>平均占比</small><strong>${formatPercent(data.avgLatestWeight)}</strong></span>
+        <span class="etf-card-metric"><small>持仓资金</small><strong>${formatChineseAmount(data.totalHoldingValue)}</strong></span>
+        <span class="etf-card-metric"><small>占总市值</small><strong>${formatPercent(data.stockMarketValueRatio)}</strong></span>
+      </div>
+      ${periodSummaries.length ? `
+        <div class="etf-stock-periods">
+          ${periodSummaries.map((item) => `
+            <span class="etf-stock-period">
+              <small>${escapeHtml(item.period)}日 · 对比 ${escapeHtml(item.compareDate || "--")} · ${escapeHtml(item.comparableEtfs || 0)}只可比</small>
+              <strong class="${trendClass(item.avgWeightChange)}">持仓 ${formatPercent(item.avgWeightChange)}</strong>
+              <b class="${trendClass(item.periodChangePercent)}">股价 ${formatPercent(item.periodChangePercent)}</b>
+            </span>
+          `).join("")}
+        </div>
+      ` : ""}
+      ${details.length ? etfStockHoldingDetailsTable(details) : emptyState("当前 ETF 池最新快照未持有该股票")}
+      ${data.removedEtfs?.length ? `<details class="etf-failures"><summary>对比期曾持有但最新未持有 ${escapeHtml(data.removedEtfs.length)} 只</summary><ul>${data.removedEtfs.slice(0, 20).map((item) => `<li>${escapeHtml(item.etfCode)} ${escapeHtml(item.etfName || "")}：旧占比 ${formatPercent(item.oldWeight)}</li>`).join("")}</ul></details>` : ""}
+    </div>
+  `;
+}
+
+function etfStockHoldingDetailsTable(details) {
+  const periods = [5, 10, 15, 30];
+  return `
+    <div class="etf-detail-scroll">
+      <table class="etf-detail-table etf-stock-holding-table">
+        <thead>
+          <tr>
+            <th>ETF</th>
+            <th>分类</th>
+            <th>最新占比</th>
+            ${periods.map((period) => `<th>${period}日变化</th>`).join("")}
+            <th>持仓资金</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${details.map((item) => `
+            <tr>
+              <td><strong>${escapeHtml(item.etfName)}</strong><small>${escapeHtml(item.etfCode)}</small></td>
+              <td><strong>${escapeHtml(item.secondaryCategory || item.primaryCategory || "--")}</strong><small>${escapeHtml(item.primaryCategory || "")}</small></td>
+              <td>${formatPercent(item.latestWeight)}</td>
+              ${periods.map((period) => etfStockPeriodChangeCell(item.periodChanges?.[period])).join("")}
+              <td>${item.holdingValue == null ? escapeHtml(item.holdingValueStatus || "缺资金口径") : formatChineseAmount(item.holdingValue)}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function etfStockPeriodChangeCell(change) {
+  if (!change) return `<td>--</td>`;
+  return `
+    <td>
+      <strong class="${trendClass(change.weightChange)}">${formatPercent(change.weightChange)}</strong>
+      <small class="${etfHoldingStatusClass(change.status)}">${escapeHtml(change.status || "")}${change.oldWeight == null ? "" : ` · 旧 ${formatPercent(change.oldWeight)}`}</small>
+    </td>
+  `;
+}
+
+function etfHoldingStatusClass(status) {
+  if (status === "增加" || status === "新进") return "up-text";
+  if (status === "减少" || status === "剔除/清仓") return "down-text";
+  return "";
 }
 
 function etfDailyStatusTemplate() {
@@ -4200,16 +4962,22 @@ function etfDailyStatusTemplate() {
   }
   const percent = Number(data.completionPercent || 0);
   const width = Math.max(0, Math.min(100, percent));
-  const targetText = data.snapshotDate ? `目标交易日 ${data.snapshotDate}` : "暂无目标交易日";
+  const isWaitingSource = data.dataStatus === "waiting_source" && data.sourcePendingDate;
+  const titleText = isWaitingSource ? "ETF持仓源待更新" : `ETF数据入库率 ${percent.toFixed(1)}%`;
+  const targetText = isWaitingSource
+    ? `当前展示 ${data.snapshotDate || "--"}`
+    : data.snapshotDate ? `目标交易日 ${data.snapshotDate}` : "暂无目标交易日";
   const refreshText = Array.isArray(data.refreshTimes) && data.refreshTimes.length ? data.refreshTimes.join(" / ") : "--";
   const fullRefreshText = Array.isArray(data.fullRefreshTimes) && data.fullRefreshTimes.length ? data.fullRefreshTimes.join(" / ") : "";
-  const statusText = data.missingEtfs > 0
+  const statusText = isWaitingSource
+    ? `等待 ${data.sourcePendingDate} 源数据上传`
+    : data.missingEtfs > 0
     ? `待补 ${data.missingEtfs} 只，${escapeHtml(data.finalAttemptTime || "08:30")} 前持续补缺口`
     : "已完成入库";
   return `
     <div class="etf-daily-status">
       <div class="etf-daily-status-head">
-        <strong>今日ETF数据已完成入库率 ${escapeHtml(percent.toFixed(1))}%</strong>
+        <strong>${escapeHtml(titleText)}</strong>
         <span class="${data.coverageTargetMet ? "up-text" : "down-text"}">${escapeHtml(data.completedEtfs || 0)} / ${escapeHtml(data.totalEtfs || 0)}</span>
       </div>
       <div class="etf-daily-progress" aria-hidden="true"><span style="width: ${width}%"></span></div>
@@ -4233,6 +5001,7 @@ function etfCoverageTemplate(data, secondary) {
       <span>ETF ${escapeHtml(data.requestedEtfs || etfCount)} 只</span>
       <span>最新快照 ${escapeHtml(data.latestDate || "--")}</span>
       <span>对比快照 ${escapeHtml(data.compareDate || "--")}</span>
+      <span>可比较 ${escapeHtml(data.comparableEtfs ?? 0)} 只</span>
       <span>最新覆盖 ${escapeHtml(data.latestEtfs || 0)} / 对比覆盖 ${escapeHtml(data.compareEtfs || 0)}</span>
       <span class="${data.partial ? "down-text" : "up-text"}">${data.partial ? "部分覆盖" : "覆盖完整"}${escapeHtml(staleText)}</span>
     </div>
@@ -4246,34 +5015,70 @@ function etfCoverageTemplate(data, secondary) {
 }
 
 function etfChangeBlock(title, kind, rows) {
+  const sortValue = state.etfChangeSort[kind] || "default";
+  const sortedRows = sortEtfChangeRows(rows, sortValue);
   return `
     <section class="etf-change-block">
       <header>
-        <strong>${escapeHtml(title)}</strong>
-        <span>${escapeHtml(rows.length)} 只股票</span>
+        <div class="etf-block-title">
+          <strong>${escapeHtml(title)}</strong>
+          <span class="etf-block-count"><b>${escapeHtml(rows.length)}</b> 只股票</span>
+        </div>
+        ${rows.length ? etfChangeSortControl(kind, sortValue) : ""}
       </header>
-      ${rows.length ? etfChangeTable(kind, rows) : emptyState("暂无符合条件的股票")}
+      ${rows.length ? etfChangeTable(kind, sortedRows) : emptyState("暂无符合条件的股票")}
     </section>
   `;
 }
 
+function etfChangeSortControl(kind, value) {
+  const options = [
+    ["default", "默认排序"],
+    ["etf_count", "ETF数"],
+    ["latest_weight", "最新占比"],
+    ["weight_change", "变化"],
+    ["period_change", "周期涨跌"],
+    ["holding_value", "持仓资金"],
+    ["market_ratio", "占总市值"]
+  ];
+  return `
+    <label class="etf-sort-control">
+      <span>排序</span>
+      <select data-etf-block-sort="${escapeAttr(kind)}">
+        ${options.map(([key, label]) => `<option value="${key}" ${value === key ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+      </select>
+    </label>
+  `;
+}
+
+function sortEtfChangeRows(rows, sortValue) {
+  if (!sortValue || sortValue === "default") return rows;
+  const keyMap = {
+    etf_count: "etf_count",
+    latest_weight: "avg_latest_weight",
+    weight_change: "avg_weight_change",
+    period_change: "period_change_percent",
+    holding_value: "total_holding_value",
+    market_ratio: "stock_market_value_ratio"
+  };
+  const key = keyMap[sortValue];
+  if (!key) return rows;
+  return [...rows].sort((a, b) => {
+    const av = numberOrNull(a[key]);
+    const bv = numberOrNull(b[key]);
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    const diff = bv - av;
+    if (diff) return diff;
+    return (numberOrNull(b.etf_count) ?? 0) - (numberOrNull(a.etf_count) ?? 0);
+  });
+}
+
 function etfChangeTable(kind, rows) {
   return `
-    <div class="etf-change-scroll">
-      <table class="etf-change-table">
-        <thead>
-          <tr>
-            <th>股票</th>
-            <th>ETF数</th>
-            <th>平均最新占比</th>
-            <th>平均变化</th>
-            <th>周期涨跌</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.map((row) => etfChangeRow(kind, row)).join("")}
-        </tbody>
-      </table>
+    <div class="etf-change-list">
+      ${rows.map((row) => etfChangeRow(kind, row)).join("")}
     </div>
   `;
 }
@@ -4281,47 +5086,80 @@ function etfChangeTable(kind, rows) {
 function etfChangeRow(kind, row) {
   const key = `${kind}:${row.stockCode}`;
   const open = state.etfExpandedStocks.has(key);
+  const showAverageChange = kind !== "newStocks";
+  const coverageNote = row.holding_value_missing_count
+    ? `<small>覆盖 ${escapeHtml(row.holding_value_coverage_count || 0)}/${escapeHtml(row.etf_count || 0)}</small>`
+    : "";
   return `
-    <tr>
-      <td>
-        <button type="button" class="etf-stock-button" data-etf-stock-toggle="${escapeAttr(key)}">
-          <strong>${escapeHtml(row.stockName || row.stockCode)}</strong>
-          <small>${escapeHtml(row.stockCode)} ${open ? "收起" : "展开"}</small>
+    <article class="etf-change-card">
+      <div class="etf-card-head">
+        <button type="button" class="etf-stock-button ${open ? "is-open" : ""}" data-etf-stock-toggle="${escapeAttr(key)}">
+          <span class="etf-stock-main">
+            <strong>${escapeHtml(row.stockName || row.stockCode)}</strong>
+            <small>${escapeHtml(row.stockCode)}</small>
+          </span>
+          <span class="etf-expand-pill">${open ? "收起明细" : "展开明细"}</span>
         </button>
-        ${open ? etfDetailTable(row.details || []) : ""}
-      </td>
-      <td>${escapeHtml(row.etf_count || 0)}</td>
-      <td>${formatPercent(row.avg_latest_weight)}</td>
-      <td class="${trendClass(row.avg_weight_change)}">${formatPercent(row.avg_weight_change)}</td>
-      <td class="${trendClass(row.period_change_percent)}">${formatPercent(row.period_change_percent)}</td>
-    </tr>
+        <span class="etf-card-count"><small>命中 ETF</small><b>${escapeHtml(row.etf_count || 0)}</b><em>只</em></span>
+      </div>
+      <div class="etf-card-metrics">
+        <span class="etf-card-metric">
+          <small>最新占比</small>
+          <strong>${formatPercent(row.avg_latest_weight)}</strong>
+        </span>
+        ${showAverageChange ? `
+          <span class="etf-card-metric">
+            <small>变化</small>
+            <strong class="${trendClass(row.avg_weight_change)}">${formatPercent(row.avg_weight_change)}</strong>
+          </span>
+        ` : ""}
+        <span class="etf-card-metric">
+          <small>周期涨跌</small>
+          <strong class="${trendClass(row.period_change_percent)}">${row.period_change_percent == null ? escapeHtml(row.period_change_status || "--") : formatPercent(row.period_change_percent)}</strong>
+        </span>
+        <span class="etf-card-metric">
+          <small>持仓资金</small>
+          <strong>${formatChineseAmount(row.total_holding_value)}</strong>
+          ${coverageNote}
+        </span>
+        <span class="etf-card-metric">
+          <small>占总市值</small>
+          <strong>${row.stock_market_value_ratio == null ? escapeHtml(row.stock_market_value_status || "--") : formatPercent(row.stock_market_value_ratio)}</strong>
+        </span>
+      </div>
+      ${open ? etfDetailTable(row.details || []) : ""}
+    </article>
   `;
 }
 
 function etfDetailTable(details) {
   return `
-    <table class="etf-detail-table">
-      <thead>
-        <tr>
-          <th>ETF</th>
-          <th>旧占比</th>
-          <th>最新占比</th>
-          <th>变化</th>
-          <th>状态</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${details.map((item) => `
+    <div class="etf-detail-scroll">
+      <table class="etf-detail-table">
+        <thead>
           <tr>
-            <td><strong>${escapeHtml(item.etfName)}</strong><small>${escapeHtml(item.etfCode)}</small></td>
-            <td>${formatPercent(item.oldWeight)}</td>
-            <td>${formatPercent(item.latestWeight)}</td>
-            <td class="${trendClass(item.weightChange)}">${formatPercent(item.weightChange)}</td>
-            <td>${escapeHtml(item.status || "")}</td>
+            <th>ETF</th>
+            <th>旧占比</th>
+            <th>最新占比</th>
+            <th>变化</th>
+            <th>持仓资金</th>
+            <th>状态</th>
           </tr>
-        `).join("")}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          ${details.map((item) => `
+            <tr>
+              <td><strong>${escapeHtml(item.etfName)}</strong><small>${escapeHtml(item.etfCode)}</small></td>
+              <td>${formatPercent(item.oldWeight)}</td>
+              <td>${formatPercent(item.latestWeight)}</td>
+              <td class="${trendClass(item.weightChange)}">${formatPercent(item.weightChange)}</td>
+              <td>${item.holdingValue == null ? escapeHtml(item.holdingValueStatus || "缺资金口径") : formatChineseAmount(item.holdingValue)}</td>
+              <td>${escapeHtml(item.status || "")}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
   `;
 }
 
@@ -5586,7 +6424,7 @@ function emptyState(text) {
 }
 
 function mobileVisible(tab) {
-  return state.activeTab === tab ? "mobile-visible" : "";
+  return effectiveActiveTab() === tab ? "mobile-visible" : "";
 }
 
 function formatNumber(value) {

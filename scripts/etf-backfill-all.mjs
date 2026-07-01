@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 
 const dbPath = process.env.ETF_DB_PATH || "/app/data/dashboard.sqlite";
 const csvPath = process.env.ETF_CATEGORY_CSV || "/app/ETF按行业板块分类.csv";
-const days = Math.max(1, Math.min(30, Number(process.env.ETF_BACKFILL_DAYS || 30) || 30));
+const days = Math.max(1, Math.min(90, Number(process.env.ETF_BACKFILL_DAYS || 30) || 30));
 const concurrency = Math.max(1, Math.min(8, Number(process.env.ETF_BACKFILL_CONCURRENCY || 3) || 3));
 const force = process.env.ETF_BACKFILL_FORCE === "true";
 const endDate = clean(process.env.ETF_BACKFILL_END_DATE || "");
