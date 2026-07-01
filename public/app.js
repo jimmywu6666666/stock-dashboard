@@ -36,6 +36,13 @@ const state = {
   sectorRanking: emptyEnvelope(null),
   sectorRankingDate: "latest",
   sectorRankingSort: { key: "source_rank", direction: "asc" },
+  etfCategories: emptyEnvelope({ categories: [], total: 0 }),
+  etfDailyStatus: emptyEnvelope(null),
+  etfSelectedPrimary: "",
+  etfSelectedSecondary: "",
+  etfPeriod: 15,
+  etfChanges: emptyEnvelope(null),
+  etfExpandedStocks: new Set(),
   watchlist: [],
   adminUsers: emptyEnvelope([]),
   reportSettings: emptyEnvelope(null),
@@ -100,7 +107,9 @@ const bootTaskDefinitions = [
   ["jin10", "金十资讯"],
   ["eastmoneyNews", "东财资讯"],
   ["hotTopics", "热股/主线"],
-  ["sectors", "概念板块"],
+  ["sectorSummary", "板块摘要"],
+  ["etfCategories", "ETF 分类"],
+  ["etfDailyStatus", "ETF 入库率"],
   ["watchlist", "自选股"],
   ["posts", "股吧帖子"],
   ["reportSettings", "收盘日报"],
@@ -194,7 +203,7 @@ function bootTaskHasDegraded(key) {
     jin10: () => hasError(state.jin10),
     eastmoneyNews: () => hasError(state.eastmoneyNews),
     hotTopics: () => hasError(state.mainlines) || hasError(state.hotStocks),
-    sectors: () => hasError(state.sectorRankingDates) || hasError(state.sectorRanking),
+    sectorSummary: () => hasError(state.sectorFlowDates) || hasError(state.sectorRankingDates) || hasError(state.sectorFlowPreference),
     watchlist: () => Boolean(state.message),
     posts: () => hasError(state.posts.guba),
     reportSettings: () => hasError(state.reportSettings),
@@ -226,7 +235,7 @@ async function login(event) {
     } finally {
       state.booting = false;
       render();
-      ensureSectorFlowLoaded({ silent: true });
+      warmSectorsAfterBoot();
     }
   } catch (error) {
     state.message = error.message;
@@ -251,7 +260,7 @@ async function register(event) {
     } finally {
       state.booting = false;
       render();
-      ensureSectorFlowLoaded({ silent: true });
+      warmSectorsAfterBoot();
     }
   } catch (error) {
     state.message = error.message;
@@ -1214,15 +1223,152 @@ async function loadSectorRanking(options = {}) {
   await loadEnvelopeWithOptions("sectorRanking", `/api/sectors/ranking?date=${encodeURIComponent(date)}`, options);
 }
 
-async function loadSectors(options = {}) {
+async function loadSectorSummary(options = {}) {
   await Promise.all([
     loadSectorDates(options),
     loadSectorFlowPreference(options)
   ]);
-  await Promise.all([
-    loadSectorFlow(options),
-    loadSectorRanking(options)
-  ]);
+}
+
+async function loadSectors(options = {}) {
+  await loadSectorSummary(options);
+  await loadSectorRanking(options);
+  if (options.includeFlow || state.sectorMode === "flow") await loadSectorFlow(options);
+}
+
+function warmSectorsAfterBoot() {
+  if (!state.authed) return;
+  loadSectors({ silent: true }).catch(() => {});
+}
+
+async function loadEtfCategories(options = {}) {
+  if (!options.silent) setLoading("etfCategories", true);
+  try {
+    state.etfCategories = await api("/api/etf-categories");
+    seedEtfSelection();
+    await Promise.all([
+      loadEtfChanges({ silent: true }),
+      loadEtfDailyStatus({ silent: true })
+    ]);
+  } catch (error) {
+    state.etfCategories = { ...state.etfCategories, stale: true, errorMessage: error.message };
+  } finally {
+    if (!options.silent) setLoading("etfCategories", false);
+    else renderAfterAutoRefresh();
+  }
+}
+
+function seedEtfSelection() {
+  const categories = state.etfCategories.data?.categories || [];
+  if (!categories.length) return;
+  const primary = categories.find((item) => item.name === state.etfSelectedPrimary);
+  if (!primary) {
+    state.etfSelectedPrimary = "";
+    state.etfSelectedSecondary = "";
+    return;
+  }
+  const secondaries = primary.secondaries || [];
+  if (!secondaries.some((item) => item.name === state.etfSelectedSecondary)) state.etfSelectedSecondary = "";
+}
+
+async function loadEtfDailyStatus(options = {}) {
+  if (!state.user?.isAdmin) return;
+  if (!options.silent) setLoading("etfDailyStatus", true);
+  try {
+    state.etfDailyStatus = await api("/api/etf-holdings/daily-status");
+  } catch (error) {
+    state.etfDailyStatus = { ...state.etfDailyStatus, stale: true, errorMessage: error.message };
+  } finally {
+    if (!options.silent) setLoading("etfDailyStatus", false);
+    else renderAfterAutoRefresh();
+  }
+}
+
+async function loadEtfChanges(options = {}) {
+  if (!state.etfSelectedPrimary || !state.etfSelectedSecondary) return;
+  if (!options.silent) setLoading("etfChanges", true);
+  try {
+    const params = new URLSearchParams({
+      primary: state.etfSelectedPrimary,
+      secondary: state.etfSelectedSecondary,
+      period: String(state.etfPeriod)
+    });
+    state.etfChanges = await api(`/api/etf-holdings/changes?${params.toString()}`);
+  } catch (error) {
+    state.etfChanges = { ...state.etfChanges, stale: true, errorMessage: error.message };
+  } finally {
+    if (!options.silent) setLoading("etfChanges", false);
+    else renderAfterAutoRefresh();
+  }
+}
+
+function changeEtfPrimary(value) {
+  state.etfSelectedPrimary = value || "";
+  state.etfSelectedSecondary = "";
+  state.etfExpandedStocks = new Set();
+  seedEtfSelection();
+  state.etfChanges = emptyEnvelope(null);
+  render();
+  loadEtfChanges();
+}
+
+function changeEtfSecondary(value) {
+  state.etfSelectedSecondary = value || "";
+  state.etfExpandedStocks = new Set();
+  state.etfChanges = emptyEnvelope(null);
+  render();
+  loadEtfChanges();
+}
+
+function changeEtfPeriod(value) {
+  state.etfPeriod = [5, 10, 15, 30].includes(Number(value)) ? Number(value) : 15;
+  state.etfExpandedStocks = new Set();
+  render();
+  loadEtfChanges();
+}
+
+async function refreshEtfHoldings() {
+  if (!state.etfSelectedPrimary || !state.etfSelectedSecondary) return;
+  setLoading("etfRefresh", true);
+  try {
+    await api("/api/etf-holdings/refresh", {
+      method: "POST",
+      body: JSON.stringify({ primary: state.etfSelectedPrimary, secondary: state.etfSelectedSecondary })
+    });
+    await Promise.all([
+      loadEtfChanges({ silent: true }),
+      loadEtfDailyStatus({ silent: true })
+    ]);
+  } catch (error) {
+    state.etfChanges = { ...state.etfChanges, stale: true, errorMessage: error.message };
+  } finally {
+    setLoading("etfRefresh", false);
+  }
+}
+
+async function backfillEtfHoldings() {
+  if (!state.etfSelectedPrimary || !state.etfSelectedSecondary) return;
+  setLoading("etfBackfill", true);
+  try {
+    await api("/api/etf-holdings/backfill?days=30", {
+      method: "POST",
+      body: JSON.stringify({ primary: state.etfSelectedPrimary, secondary: state.etfSelectedSecondary, days: 30 })
+    });
+    await Promise.all([
+      loadEtfChanges({ silent: true }),
+      loadEtfDailyStatus({ silent: true })
+    ]);
+  } catch (error) {
+    state.etfChanges = { ...state.etfChanges, stale: true, errorMessage: error.message };
+  } finally {
+    setLoading("etfBackfill", false);
+  }
+}
+
+function toggleEtfStock(rowKey) {
+  if (state.etfExpandedStocks.has(rowKey)) state.etfExpandedStocks.delete(rowKey);
+  else state.etfExpandedStocks.add(rowKey);
+  render();
 }
 
 async function loadSectorFlowPreference(options = {}) {
@@ -1270,6 +1416,7 @@ function switchSectorMode(mode) {
   stopSectorReplay();
   render();
   if (state.sectorMode === "flow") ensureSectorFlowLoaded();
+  if (state.sectorMode === "ranking" && !state.sectorRanking.data && !state.loading.has("sectorRanking")) loadSectorRankingOnly();
 }
 
 function changeSectorFlowDate(value) {
@@ -1408,7 +1555,9 @@ async function refreshAll(options = {}) {
     loadEnvelope("eastmoneyNews", "/api/news/eastmoney-hot?limit=10"),
     loadEnvelope("mainlines", "/api/mainlines?limit=30"),
     loadEnvelope("hotStocks", "/api/hot-stocks?limit=10"),
-    loadSectors(),
+    loadSectorSummary({ silent: true }),
+    loadEtfCategories({ silent: true }),
+    loadEtfDailyStatus({ silent: true }),
     loadWatchlist(),
     loadReportSettings(),
     loadAdminUsers(),
@@ -1435,12 +1584,22 @@ async function refreshAllWithBootProgress(options = {}) {
         loadEnvelope("hotStocks", "/api/hot-stocks?limit=10")
       ]);
     }),
-    runBootTask("sectors", () => loadSectors({ silent: true })),
+    runBootTask("sectorSummary", () => loadSectorSummary({ silent: true })),
+    runBootTask("etfCategories", () => loadEtfCategories({ silent: true })),
+    runBootTask("etfDailyStatus", () => loadEtfDailyStatus({ silent: true })),
     runBootTask("posts", () => state.selectedSymbol ? loadPosts(state.selectedSymbol) : Promise.resolve()),
     runBootTask("reportSettings", () => loadReportSettings()),
     runBootTask("adminUsers", () => loadAdminUsers()),
     runBootTask("dsaHistory", () => state.dsaConfig.data?.configured ? loadDsaHistory({ silent: true }) : Promise.resolve())
   ]);
+}
+
+async function refreshDashboard() {
+  try {
+    await refreshAll();
+  } finally {
+    warmSectorsAfterBoot();
+  }
 }
 
 function isUserReadingOrEditing() {
@@ -1460,6 +1619,7 @@ function isUserReadingOrEditing() {
     || state.openHoldingId
     || state.activeTab === "AI分析"
     || state.activeTab === "板块"
+    || state.activeTab === "ETF持仓变化"
     || state.activeTab === "使用手册"
     || state.activeTab === "管理"
     || recentlyScrolled
@@ -2048,7 +2208,7 @@ function bindEvents() {
     importForm.querySelector("input")?.addEventListener("change", () => importWatchScreenshot(importForm));
   }
   document.querySelectorAll("[data-tab]").forEach((el) => el.addEventListener("click", () => switchTab(el.dataset.tab)));
-  document.querySelectorAll("[data-refresh]").forEach((el) => el.addEventListener("click", refreshAll));
+  document.querySelectorAll("[data-refresh]").forEach((el) => el.addEventListener("click", refreshDashboard));
   document.querySelectorAll("[data-logout]").forEach((el) => el.addEventListener("click", logout));
   document.querySelectorAll("[data-open-stock]").forEach((el) => el.addEventListener("click", (event) => {
     event.preventDefault();
@@ -2133,6 +2293,10 @@ function bindEvents() {
   document.querySelectorAll("[data-sector-speed]").forEach((el) => el.addEventListener("input", () => changeSectorReplaySpeed(el.value)));
   document.querySelectorAll("[data-sector-sort]").forEach((el) => el.addEventListener("click", () => sortSectorRanking(el.dataset.sectorSort)));
   document.querySelectorAll("[data-sector-export]").forEach((el) => el.addEventListener("click", downloadSectorRankingCsv));
+  document.querySelectorAll("[data-etf-primary]").forEach((el) => el.addEventListener("change", () => changeEtfPrimary(el.value)));
+  document.querySelectorAll("[data-etf-secondary]").forEach((el) => el.addEventListener("change", () => changeEtfSecondary(el.value)));
+  document.querySelectorAll("[data-etf-period]").forEach((el) => el.addEventListener("change", () => changeEtfPeriod(el.value)));
+  document.querySelectorAll("[data-etf-stock-toggle]").forEach((el) => el.addEventListener("click", () => toggleEtfStock(el.dataset.etfStockToggle)));
   document.querySelectorAll("[data-close-detail]").forEach((el) => el.addEventListener("click", closeDetail));
   const stockDetailContent = document.querySelector(".stock-detail-content");
   if (stockDetailContent) {
@@ -2323,7 +2487,12 @@ function switchTab(tab) {
   state.lockedWatchPanelScrollTop = null;
   state.lastUserScrollAt = Date.now();
   render();
-  if (tab === "板块" && (!state.sectorFlow.data || !state.sectorRanking.data) && !state.loading.has("sectorFlow") && !state.loading.has("sectorRanking")) loadSectors();
+  if (tab === "板块" && !state.sectorRanking.data && !state.loading.has("sectorRanking")) loadSectorRankingOnly();
+  if (tab === "板块" && state.sectorMode === "flow" && !state.sectorFlow.data && !state.loading.has("sectorFlow")) ensureSectorFlowLoaded();
+  if (tab === "ETF持仓变化") {
+    if (!state.etfCategories.data?.categories?.length && !state.loading.has("etfCategories")) loadEtfCategories();
+    if (!state.etfDailyStatus.data && !state.loading.has("etfDailyStatus")) loadEtfDailyStatus();
+  }
   state.lockedPageScrollTop = null;
   requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0, behavior: "auto" }));
 }
@@ -2386,7 +2555,7 @@ function registerTemplate() {
 }
 
 function dashboardTemplate() {
-  const tabs = state.user?.isAdmin ? [...baseTabs, "管理"] : baseTabs;
+  const tabs = state.user?.isAdmin ? [...baseTabs, "ETF持仓变化", "管理"] : baseTabs;
   return `
     <div class="app-shell">
       <header class="topbar">
@@ -2464,6 +2633,13 @@ function dashboardTemplate() {
           ${sectionTitle("板块", state.sectorMode === "flow" ? state.sectorFlow : state.sectorRanking, state.sectorMode === "flow" ? "sectorFlow" : "sectorRanking")}
           ${sectorFeatureTemplate()}
         </section>
+
+        ${state.user?.isAdmin ? `
+          <section class="panel etf-holdings-panel mobile-section ${mobileVisible("ETF持仓变化")}">
+            ${sectionTitle("ETF持仓变化", state.etfChanges.data ? state.etfChanges : state.etfCategories, "etfHoldings")}
+            ${etfHoldingsTemplate()}
+          </section>
+        ` : ""}
 
         ${state.user?.isAdmin ? `
           <section class="panel admin-panel mobile-section ${mobileVisible("管理")}">
@@ -3966,6 +4142,189 @@ function mainlineItem(item) {
   `;
 }
 
+function etfHoldingsTemplate() {
+  const categories = state.etfCategories.data?.categories || [];
+  if (state.loading.has("etfCategories") && !categories.length) return `<div class="card-loading">ETF 分类加载中...</div>`;
+  if (!categories.length) {
+    return `
+      ${state.etfCategories.errorMessage ? `<p class="warning">${escapeHtml(state.etfCategories.errorMessage)}</p>` : ""}
+      ${emptyState("暂无 ETF 分类数据")}
+    `;
+  }
+  const primary = categories.find((item) => item.name === state.etfSelectedPrimary);
+  const secondaries = primary?.secondaries || [];
+  const secondary = secondaries.find((item) => item.name === state.etfSelectedSecondary);
+  const data = state.etfChanges.data;
+  return `
+    <div class="etf-toolbar">
+      <label>
+        <span>一级分类</span>
+        <select data-etf-primary>
+          <option value="" ${!primary ? "selected" : ""}>请选择一级分类</option>
+          ${categories.map((item) => `<option value="${escapeAttr(item.name)}" ${item.name === primary?.name ? "selected" : ""}>${escapeHtml(item.name)}（${item.count}）</option>`).join("")}
+        </select>
+      </label>
+      <label>
+        <span>二级分类</span>
+        <select data-etf-secondary ${primary ? "" : "disabled"}>
+          <option value="" ${!secondary ? "selected" : ""}>${primary ? "请选择二级分类" : "先选择一级分类"}</option>
+          ${secondaries.map((item) => `<option value="${escapeAttr(item.name)}" ${item.name === secondary?.name ? "selected" : ""}>${escapeHtml(item.name)}（${item.count}）</option>`).join("")}
+        </select>
+      </label>
+      <label>
+        <span>对比周期</span>
+        <select data-etf-period>
+          ${[5, 10, 15, 30].map((period) => `<option value="${period}" ${Number(state.etfPeriod) === period ? "selected" : ""}>${period} 个交易日</option>`).join("")}
+        </select>
+      </label>
+    </div>
+    ${etfDailyStatusTemplate()}
+    ${state.etfChanges.errorMessage ? `<p class="warning">${escapeHtml(state.etfChanges.errorMessage)}</p>` : ""}
+    ${etfCoverageTemplate(data, secondary)}
+    ${state.loading.has("etfChanges") && !data ? `<div class="chart-empty">统计加载中...</div>` : ""}
+    ${data ? `
+      <div class="etf-change-grid">
+        ${etfChangeBlock("新进股票", "newStocks", data.summary?.newStocks || [])}
+        ${etfChangeBlock("权重增加 ≥5 个百分点", "growth5", data.summary?.growth5 || [])}
+        ${etfChangeBlock("权重增加 ≥10 个百分点", "growth10", data.summary?.growth10 || [])}
+      </div>
+    ` : emptyState("请选择一级分类和二级分类")}
+  `;
+}
+
+function etfDailyStatusTemplate() {
+  const data = state.etfDailyStatus.data;
+  if (state.etfDailyStatus.errorMessage) return `<p class="warning">${escapeHtml(state.etfDailyStatus.errorMessage)}</p>`;
+  if (!data) {
+    return state.loading.has("etfDailyStatus") ? `<div class="etf-daily-status"><span>今日 ETF 数据入库率加载中...</span></div>` : "";
+  }
+  const percent = Number(data.completionPercent || 0);
+  const width = Math.max(0, Math.min(100, percent));
+  const targetText = data.snapshotDate ? `目标交易日 ${data.snapshotDate}` : "暂无目标交易日";
+  const refreshText = Array.isArray(data.refreshTimes) && data.refreshTimes.length ? data.refreshTimes.join(" / ") : "--";
+  const fullRefreshText = Array.isArray(data.fullRefreshTimes) && data.fullRefreshTimes.length ? data.fullRefreshTimes.join(" / ") : "";
+  const statusText = data.missingEtfs > 0
+    ? `待补 ${data.missingEtfs} 只，${escapeHtml(data.finalAttemptTime || "08:30")} 前持续补缺口`
+    : "已完成入库";
+  return `
+    <div class="etf-daily-status">
+      <div class="etf-daily-status-head">
+        <strong>今日ETF数据已完成入库率 ${escapeHtml(percent.toFixed(1))}%</strong>
+        <span class="${data.coverageTargetMet ? "up-text" : "down-text"}">${escapeHtml(data.completedEtfs || 0)} / ${escapeHtml(data.totalEtfs || 0)}</span>
+      </div>
+      <div class="etf-daily-progress" aria-hidden="true"><span style="width: ${width}%"></span></div>
+      <div class="etf-daily-status-meta">
+        <span>${escapeHtml(targetText)}</span>
+        <span>${escapeHtml(statusText)}</span>
+        <span>定时采集 ${escapeHtml(refreshText)}</span>
+        ${fullRefreshText ? `<span>全量覆盖 ${escapeHtml(fullRefreshText)}</span>` : ""}
+        ${data.lastStatusUpdatedAt ? `<span>最近状态 ${escapeHtml(formatDateTime(data.lastStatusUpdatedAt))}</span>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function etfCoverageTemplate(data, secondary) {
+  const etfCount = secondary?.count || 0;
+  if (!data) return `<p class="etf-note">当前二级分类共 ${escapeHtml(etfCount)} 只 ETF。历史对比依赖定时采集和可用快照。</p>`;
+  const staleText = data.coverageMessage ? ` · ${data.coverageMessage}` : "";
+  return `
+    <div class="etf-status-row">
+      <span>ETF ${escapeHtml(data.requestedEtfs || etfCount)} 只</span>
+      <span>最新快照 ${escapeHtml(data.latestDate || "--")}</span>
+      <span>对比快照 ${escapeHtml(data.compareDate || "--")}</span>
+      <span>最新覆盖 ${escapeHtml(data.latestEtfs || 0)} / 对比覆盖 ${escapeHtml(data.compareEtfs || 0)}</span>
+      <span class="${data.partial ? "down-text" : "up-text"}">${data.partial ? "部分覆盖" : "覆盖完整"}${escapeHtml(staleText)}</span>
+    </div>
+    ${data.failures?.length ? `
+      <details class="etf-failures">
+        <summary>采集失败 ${data.failures.length} 项</summary>
+        <ul>${data.failures.slice(0, 20).map((item) => `<li>${escapeHtml(item.etfCode)} ${escapeHtml(item.etfName || "")}：${escapeHtml(item.errorMessage || "失败")}</li>`).join("")}</ul>
+      </details>
+    ` : ""}
+  `;
+}
+
+function etfChangeBlock(title, kind, rows) {
+  return `
+    <section class="etf-change-block">
+      <header>
+        <strong>${escapeHtml(title)}</strong>
+        <span>${escapeHtml(rows.length)} 只股票</span>
+      </header>
+      ${rows.length ? etfChangeTable(kind, rows) : emptyState("暂无符合条件的股票")}
+    </section>
+  `;
+}
+
+function etfChangeTable(kind, rows) {
+  return `
+    <div class="etf-change-scroll">
+      <table class="etf-change-table">
+        <thead>
+          <tr>
+            <th>股票</th>
+            <th>ETF数</th>
+            <th>平均最新占比</th>
+            <th>平均变化</th>
+            <th>周期涨跌</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((row) => etfChangeRow(kind, row)).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function etfChangeRow(kind, row) {
+  const key = `${kind}:${row.stockCode}`;
+  const open = state.etfExpandedStocks.has(key);
+  return `
+    <tr>
+      <td>
+        <button type="button" class="etf-stock-button" data-etf-stock-toggle="${escapeAttr(key)}">
+          <strong>${escapeHtml(row.stockName || row.stockCode)}</strong>
+          <small>${escapeHtml(row.stockCode)} ${open ? "收起" : "展开"}</small>
+        </button>
+        ${open ? etfDetailTable(row.details || []) : ""}
+      </td>
+      <td>${escapeHtml(row.etf_count || 0)}</td>
+      <td>${formatPercent(row.avg_latest_weight)}</td>
+      <td class="${trendClass(row.avg_weight_change)}">${formatPercent(row.avg_weight_change)}</td>
+      <td class="${trendClass(row.period_change_percent)}">${formatPercent(row.period_change_percent)}</td>
+    </tr>
+  `;
+}
+
+function etfDetailTable(details) {
+  return `
+    <table class="etf-detail-table">
+      <thead>
+        <tr>
+          <th>ETF</th>
+          <th>旧占比</th>
+          <th>最新占比</th>
+          <th>变化</th>
+          <th>状态</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${details.map((item) => `
+          <tr>
+            <td><strong>${escapeHtml(item.etfName)}</strong><small>${escapeHtml(item.etfCode)}</small></td>
+            <td>${formatPercent(item.oldWeight)}</td>
+            <td>${formatPercent(item.latestWeight)}</td>
+            <td class="${trendClass(item.weightChange)}">${formatPercent(item.weightChange)}</td>
+            <td>${escapeHtml(item.status || "")}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
 function sectorFeatureTemplate() {
   if (state.sectorMode === "overview") return sectorOverviewTemplate();
   return `
@@ -5356,7 +5715,7 @@ async function initializeApp() {
   } finally {
     state.booting = false;
     render();
-    ensureSectorFlowLoaded({ silent: true });
+    warmSectorsAfterBoot();
   }
 }
 

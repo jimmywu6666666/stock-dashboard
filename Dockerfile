@@ -9,6 +9,9 @@ ENV PORT=3000
 COPY package.json ./
 COPY server ./server
 COPY public ./public
+COPY scripts/etf-backfill-all.mjs ./scripts/etf-backfill-all.mjs
+COPY ETF按行业板块分类.csv ./
+COPY ETF按行业板块分类.md ./
 
 RUN mkdir -p /app/data
 

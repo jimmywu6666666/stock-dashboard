@@ -1189,6 +1189,7 @@ textarea {
     "ai ai ai"
     "watch heat heat"
     "sectorfeature sectorfeature sectorfeature"
+    "etfholdings etfholdings etfholdings"
     "admin admin admin"
     "guide guide guide";
   gap: 12px;
@@ -1227,6 +1228,221 @@ textarea {
 .dsa-panel { grid-area: ai; }
 .heat-row { grid-area: heat; }
 .sector-feature-panel { grid-area: sectorfeature; }
+
+.etf-holdings-panel { grid-area: etfholdings; }
+
+.etf-toolbar,
+.etf-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.etf-toolbar label {
+  display: grid;
+  gap: 7px;
+  min-width: 220px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.etf-toolbar select {
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  appearance: none;
+  background-color: var(--panel);
+  background-image: url("data:image/svg+xml,%3Csvg width='18' height='18' viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M7 10l5 5 5-5' stroke='%2364758b' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-position: right 12px center;
+  background-repeat: no-repeat;
+  background-size: 18px;
+  color: var(--ink);
+  padding: 8px 42px 8px 14px;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.etf-toolbar select:disabled {
+  color: var(--muted);
+  background-color: #f8fafc;
+  cursor: not-allowed;
+}
+
+.etf-toolbar select:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+  outline: none;
+}
+
+.etf-toolbar button {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  padding: 6px 11px;
+  cursor: pointer;
+}
+
+.etf-toolbar button:disabled {
+  cursor: wait;
+  opacity: 0.64;
+}
+
+.etf-note,
+.etf-status-row,
+.etf-failures {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.etf-daily-status {
+  display: grid;
+  gap: 9px;
+  margin: 0 0 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.etf-daily-status-head,
+.etf-daily-status-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: center;
+}
+
+.etf-daily-status-head strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.etf-daily-progress {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.etf-daily-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2563eb, #16a34a);
+  transition: width 0.24s ease;
+}
+
+.etf-status-row {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.etf-failures {
+  margin: -4px 0 14px;
+}
+
+.etf-failures ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.etf-change-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.etf-change-block {
+  min-width: 0;
+}
+
+.etf-change-block header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+
+.etf-change-block header strong {
+  font-size: 15px;
+}
+
+.etf-change-block header span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.etf-change-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.etf-change-table,
+.etf-detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.etf-change-table th,
+.etf-change-table td,
+.etf-detail-table th,
+.etf-detail-table td {
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: right;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.etf-change-table th:first-child,
+.etf-change-table td:first-child,
+.etf-detail-table th:first-child,
+.etf-detail-table td:first-child {
+  text-align: left;
+}
+
+.etf-stock-button {
+  display: grid;
+  gap: 2px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.etf-stock-button strong {
+  font-size: 13px;
+}
+
+.etf-stock-button small,
+.etf-detail-table small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.etf-detail-table {
+  margin-top: 8px;
+  background: #f8fafc;
+  border-radius: 6px;
+  overflow: hidden;
+}
 .admin-panel { grid-area: admin; }
 .guide-panel { grid-area: guide; }
 
@@ -4949,6 +5165,7 @@ textarea {
       "heat heat"
       "watch watch"
       "sectorfeature sectorfeature"
+      "etfholdings etfholdings"
       "admin admin"
       "guide guide";
   }

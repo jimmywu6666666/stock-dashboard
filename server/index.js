@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import https from "node:https";
 import tls from "node:tls";
 import { readFile, mkdir, stat } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
@@ -15,6 +15,7 @@ const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "public");
 const dataDir = path.join(rootDir, "data");
 const dbPath = path.join(dataDir, "dashboard.sqlite");
+const etfCategoryCsvPath = path.join(rootDir, "ETF按行业板块分类.csv");
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -60,13 +61,34 @@ const SECTOR_PINNED_ROWS = [
 const SIGNANA_BASE_URL = cleanBaseUrl(process.env.SIGNANA_BASE_URL || "https://www.signana.com");
 const EASTMONEY_KLINE_FIELDS1 = "f1,f2,f3,f4,f5,f6";
 const EASTMONEY_KLINE_FIELDS2 = "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61";
+const ETF_HOLDING_PERIODS = [5, 10, 15, 30];
+const ETF_DEFAULT_PERIOD = 15;
+const ETF_BACKFILL_DAYS = 30;
+const ETF_HKD_CNY_RATE = Number(process.env.ETF_HKD_CNY_RATE || 0.915);
+const TUSHARE_TOKEN = clean(process.env.TUSHARE_TOKEN || "");
+const TUSHARE_API_URL = cleanBaseUrl(process.env.TUSHARE_API_URL || "https://api.tushare.pro");
+const ETF_DAILY_REFRESH_TIMES = parseTimeList(
+  process.env.ETF_DAILY_REFRESH_TIMES || "09:45,10:30,11:30,13:30,14:30,15:15,17:45,18:30,20:30,08:30",
+  ["09:45", "10:30", "11:30", "13:30", "14:30", "15:15", "17:45", "18:30", "20:30", "08:30"]
+);
+const ETF_DAILY_FULL_REFRESH_TIMES = parseTimeList(process.env.ETF_DAILY_FULL_REFRESH_TIMES || "15:15,20:30", ["15:15", "20:30"]);
+const ETF_DAILY_FINAL_TIME = clean(process.env.ETF_DAILY_FINAL_TIME || "08:30") || "08:30";
+const ETF_DAILY_COVERAGE_TARGET = Math.max(0, Math.min(1, Number(process.env.ETF_DAILY_COVERAGE_TARGET || 0.95) || 0.95));
+const ETF_ARCHIVE_MIN_CHANGE_WEIGHT = Math.max(0, Number(process.env.ETF_ARCHIVE_MIN_CHANGE_WEIGHT || 0.5) || 0.5);
 
 function cleanBaseUrl(value) {
   return String(value || "").trim().replace(/\/+$/, "");
 }
 
+function parseTimeList(value, fallback = ["17:45", "18:30", "20:30", "08:30"]) {
+  const rows = String(value || "").split(",").map((item) => clean(item)).filter(Boolean);
+  const valid = rows.filter((item) => /^([01]\d|2[0-3]):[0-5]\d$/.test(item));
+  return valid.length ? [...new Set(valid)] : fallback;
+}
+
 await mkdir(dataDir, { recursive: true });
 const db = new DatabaseSync(dbPath);
+db.exec("PRAGMA busy_timeout = 30000");
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -169,6 +191,43 @@ db.exec(`
     mainFlow REAL,
     updatedAt TEXT NOT NULL,
     PRIMARY KEY(code, tradeDate, minuteIndex)
+  );
+
+  CREATE TABLE IF NOT EXISTS etf_categories (
+    code TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    primaryCategory TEXT NOT NULL,
+    secondaryCategory TEXT NOT NULL,
+    board TEXT NOT NULL DEFAULT '',
+    fundType TEXT NOT NULL DEFAULT '',
+    updatedAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS etf_holding_snapshots (
+    etfCode TEXT NOT NULL,
+    snapshotDate TEXT NOT NULL,
+    stockCode TEXT NOT NULL,
+    stockName TEXT NOT NULL DEFAULT '',
+    weight REAL,
+    shares REAL,
+    marketValue REAL,
+    source TEXT NOT NULL DEFAULT '',
+    updatedAt TEXT NOT NULL,
+    PRIMARY KEY(etfCode, snapshotDate, stockCode)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_etf_holding_snapshots_date ON etf_holding_snapshots(snapshotDate);
+  CREATE INDEX IF NOT EXISTS idx_etf_holding_snapshots_stock ON etf_holding_snapshots(stockCode);
+
+  CREATE TABLE IF NOT EXISTS etf_holding_fetch_status (
+    etfCode TEXT NOT NULL,
+    snapshotDate TEXT NOT NULL,
+    fetchType TEXT NOT NULL,
+    status TEXT NOT NULL,
+    errorMessage TEXT NOT NULL DEFAULT '',
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    PRIMARY KEY(etfCode, snapshotDate, fetchType)
   );
 
 `);
@@ -3551,6 +3610,54 @@ function scheduleDailyReportTimer() {
   }, delay);
 }
 
+async function runScheduledEtfHoldingRefresh() {
+  const target = await etfDailyRefreshTargetDate();
+  if (!target.snapshotDate) {
+    console.log(`skip ETF holding refresh: no recent trading day (${target.reason})`);
+    return { skipped: true, reason: target.reason };
+  }
+  const fullRefresh = isEtfDailyFullRefreshTime();
+  const result = await refreshEtfHoldings({
+    fetchType: "daily",
+    snapshotDate: target.snapshotDate,
+    missingOnly: !fullRefresh,
+    finalAttempt: isEtfDailyFinalAttemptTime()
+  });
+  console.log(`ETF holding refresh ${target.snapshotDate}: mode=${fullRefresh ? "full" : "missing"} success=${result.success} failed=${result.failed} coverage=${result.coverageRatio}`);
+  return result;
+}
+
+function scheduleEtfHoldingRefreshTimer() {
+  const delay = nextEtfHoldingRefreshDelayMs();
+  setTimeout(async () => {
+    await runScheduledEtfHoldingRefresh().catch((error) => console.error("ETF holding refresh failed", error));
+    scheduleEtfHoldingRefreshTimer();
+  }, delay);
+}
+
+function nextEtfHoldingRefreshDelayMs() {
+  const now = new Date();
+  let best = null;
+  for (let dayOffset = 0; dayOffset <= 1; dayOffset += 1) {
+    const base = new Date(now.getTime() + dayOffset * 24 * 60 * 60 * 1000);
+    const dateKey = chinaDateKey(base);
+    for (const time of ETF_DAILY_REFRESH_TIMES) {
+      const candidate = new Date(`${dateKey}T${time}:00+08:00`);
+      if (candidate.getTime() <= now.getTime()) continue;
+      if (!best || candidate.getTime() < best.getTime()) best = candidate;
+    }
+  }
+  return Math.max(1000, (best || new Date(now.getTime() + 60 * 60 * 1000)).getTime() - now.getTime());
+}
+
+function isEtfDailyFinalAttemptTime(date = new Date()) {
+  return chinaTimeLabel(date) === ETF_DAILY_FINAL_TIME;
+}
+
+function isEtfDailyFullRefreshTime(date = new Date()) {
+  return ETF_DAILY_FULL_REFRESH_TIMES.includes(chinaTimeLabel(date));
+}
+
 function nextDailyReportDelayMs() {
   const [hour, minute] = DAILY_REPORT_TIME.split(":").map((part) => Number(part));
   const now = new Date();
@@ -3677,6 +3784,1050 @@ function normalizeGubaSymbol(symbol) {
   const upper = symbol.toUpperCase();
   const match = upper.match(/(\d{6})/);
   return match ? match[1] : upper;
+}
+
+function etfCategoryRowsFromDb() {
+  syncEtfCategoriesFromCsv();
+  return db.prepare(`
+    SELECT code, name, primaryCategory, secondaryCategory, board, fundType, updatedAt
+    FROM etf_categories
+    ORDER BY primaryCategory, secondaryCategory, code
+  `).all();
+}
+
+let etfCategorySyncAt = 0;
+
+function syncEtfCategoriesFromCsv() {
+  if (Date.now() - etfCategorySyncAt < 60_000) return;
+  if (!existsSync(etfCategoryCsvPath)) throw new Error("缺少 ETF 分类文件：ETF按行业板块分类.csv");
+  const content = requireTextFileSync(etfCategoryCsvPath);
+  const rows = parseCsvRows(content);
+  const now = nowIso();
+  const stmt = db.prepare(`
+    INSERT INTO etf_categories (code, name, primaryCategory, secondaryCategory, board, fundType, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(code) DO UPDATE SET
+      name = excluded.name,
+      primaryCategory = excluded.primaryCategory,
+      secondaryCategory = excluded.secondaryCategory,
+      board = excluded.board,
+      fundType = excluded.fundType,
+      updatedAt = excluded.updatedAt
+  `);
+  const seen = new Set();
+  db.exec("BEGIN");
+  try {
+    for (const row of rows) {
+      const code = clean(row.code);
+      if (!/^\d{6}$/.test(code)) continue;
+      seen.add(code);
+      stmt.run(
+        code,
+        clean(row.name),
+        clean(row.category),
+        clean(row.secondary_category),
+        clean(row.board),
+        clean(row.fund_type),
+        now
+      );
+    }
+    if (seen.size) {
+      const placeholders = [...seen].map(() => "?").join(",");
+      db.prepare(`DELETE FROM etf_categories WHERE code NOT IN (${placeholders})`).run(...seen);
+    }
+    db.exec("COMMIT");
+    etfCategorySyncAt = Date.now();
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function requireTextFileSync(filePath) {
+  return readFileSync(filePath, "utf8");
+}
+
+function parseCsvRows(content) {
+  const rows = [];
+  const lines = String(content || "").replace(/^\uFEFF/, "").split(/\r?\n/).filter((line) => line.trim());
+  if (!lines.length) return rows;
+  const headers = parseCsvLine(lines[0]);
+  for (const line of lines.slice(1)) {
+    const values = parseCsvLine(line);
+    const row = {};
+    headers.forEach((header, index) => {
+      row[header] = values[index] || "";
+    });
+    rows.push(row);
+  }
+  return rows;
+}
+
+function parseCsvLine(line) {
+  const values = [];
+  let current = "";
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === '"') {
+      if (quoted && line[index + 1] === '"') {
+        current += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (char === "," && !quoted) {
+      values.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  values.push(current);
+  return values;
+}
+
+function etfCategoryTree() {
+  const rows = etfCategoryRowsFromDb();
+  const primaryMap = new Map();
+  for (const row of rows) {
+    if (!primaryMap.has(row.primaryCategory)) {
+      primaryMap.set(row.primaryCategory, { name: row.primaryCategory, count: 0, secondaries: new Map() });
+    }
+    const primary = primaryMap.get(row.primaryCategory);
+    primary.count += 1;
+    if (!primary.secondaries.has(row.secondaryCategory)) {
+      primary.secondaries.set(row.secondaryCategory, { name: row.secondaryCategory, count: 0, etfs: [] });
+    }
+    const secondary = primary.secondaries.get(row.secondaryCategory);
+    secondary.count += 1;
+    secondary.etfs.push({ code: row.code, name: row.name });
+  }
+  const categories = [...primaryMap.values()].map((primary) => ({
+    name: primary.name,
+    count: primary.count,
+    secondaries: [...primary.secondaries.values()].map((secondary) => ({
+      ...secondary,
+      etfs: secondary.etfs.sort((a, b) => a.code.localeCompare(b.code))
+    })).sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN"))
+  })).sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN"));
+  return { categories, total: rows.length };
+}
+
+function etfsForCategory(primary, secondary) {
+  const rows = etfCategoryRowsFromDb();
+  return rows.filter((row) => {
+    if (primary && row.primaryCategory !== primary) return false;
+    if (secondary && row.secondaryCategory !== secondary) return false;
+    return true;
+  });
+}
+
+async function refreshEtfHoldings({ primary = "", secondary = "", fetchType = "manual", snapshotDate = "", missingOnly = false, finalAttempt = false } = {}) {
+  const etfs = etfsForCategory(clean(primary), clean(secondary));
+  if (!etfs.length) throw new Error("当前分类下没有 ETF");
+  const targetDate = clean(snapshotDate) || chinaDateKey();
+  let targetEtfs = etfs;
+  if (missingOnly) {
+    const existing = etfCodesWithSnapshot(targetDate);
+    const succeeded = etfCodesWithSuccessfulFetch(targetDate, fetchType);
+    targetEtfs = etfs.filter((etf) => !existing.has(etf.code) && !succeeded.has(etf.code));
+  }
+  if (!targetEtfs.length) {
+    return {
+      ...etfFetchSummary([], targetDate, etfs.length),
+      skipped: true,
+      successTotal: etfs.length,
+      failedTotal: 0,
+      missingTotal: 0,
+      coverageRatio: 1,
+      coverageTargetMet: true,
+      message: "当前日期 ETF 持仓已覆盖，无需重复采集"
+    };
+  }
+  const results = await mapWithConcurrency(targetEtfs, 3, async (etf) => fetchAndStoreEtfHolding(etf, targetDate, fetchType, { finalAttempt }));
+  const summary = etfFetchSummary(results, targetDate, targetEtfs.length);
+  const afterExisting = etfCodesWithSnapshot(targetDate);
+  const successTotal = etfs.filter((etf) => afterExisting.has(etf.code)).length;
+  const missingTotal = Math.max(0, etfs.length - successTotal);
+  const coverageRatio = etfs.length ? successTotal / etfs.length : 0;
+  return {
+    ...summary,
+    totalEtfs: etfs.length,
+    attemptedEtfs: targetEtfs.length,
+    successTotal,
+    missingTotal,
+    coverageRatio: Number(coverageRatio.toFixed(4)),
+    coverageTarget: ETF_DAILY_COVERAGE_TARGET,
+    coverageTargetMet: coverageRatio >= ETF_DAILY_COVERAGE_TARGET,
+    finalAttempt
+  };
+}
+
+async function backfillEtfHoldings({ primary = "", secondary = "", days = ETF_BACKFILL_DAYS } = {}) {
+  const etfs = etfsForCategory(clean(primary), clean(secondary));
+  if (!etfs.length) throw new Error("当前分类下没有 ETF");
+  const safeDays = Math.max(1, Math.min(30, Number(days || ETF_BACKFILL_DAYS) || ETF_BACKFILL_DAYS));
+  const dates = recentDateKeys(safeDays);
+  const tasks = [];
+  for (const etf of etfs) {
+    for (const date of dates) tasks.push({ etf, date });
+  }
+  const results = await mapWithConcurrency(tasks, 3, async ({ etf, date }) => fetchAndStoreEtfHolding(etf, date, "backfill"));
+  return {
+    requestedEtfs: etfs.length,
+    requestedDates: dates.length,
+    latestDate: dates[0] || "",
+    success: results.filter((item) => item.ok).length,
+    failed: results.filter((item) => !item.ok).length,
+    failures: results.filter((item) => !item.ok).slice(0, 80)
+  };
+}
+
+function recentDateKeys(days) {
+  const result = [];
+  const now = new Date();
+  for (let offset = 0; offset < days; offset += 1) {
+    result.push(chinaDateKey(new Date(now.getTime() - offset * 24 * 60 * 60 * 1000)));
+  }
+  return result;
+}
+
+async function etfDailyRefreshTargetDate() {
+  const latestMarketDate = await latestAshareTradingDate().catch(() => "");
+  if (latestMarketDate) return { snapshotDate: latestMarketDate, reason: "latest-market-date" };
+  const fallback = previousWeekdayDateKey(chinaDateKey());
+  return fallback ? { snapshotDate: fallback, reason: "weekday-fallback" } : { snapshotDate: "", reason: "no-weekday" };
+}
+
+async function latestAshareTradingDate() {
+  const pair = await loadIndexTurnoverPair("1.000001");
+  return clean(pair?.latestDate || "");
+}
+
+function previousWeekdayDateKey(fromDateKey) {
+  let date = dateFromChinaKey(fromDateKey);
+  for (let offset = 0; offset < 10; offset += 1) {
+    const key = chinaDateKey(date);
+    const day = date.getUTCDay();
+    if (day !== 0 && day !== 6) return key;
+    date = new Date(date.getTime() - 24 * 60 * 60 * 1000);
+  }
+  return "";
+}
+
+function dateFromChinaKey(dateKey) {
+  const [year, month, day] = clean(dateKey).split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+}
+
+function etfCodesWithSnapshot(snapshotDate) {
+  return new Set(db.prepare("SELECT DISTINCT etfCode FROM etf_holding_snapshots WHERE snapshotDate = ?").all(snapshotDate).map((row) => row.etfCode));
+}
+
+function etfCodesWithSuccessfulFetch(snapshotDate, fetchType = "daily") {
+  return new Set(db.prepare("SELECT etfCode FROM etf_holding_fetch_status WHERE snapshotDate = ? AND fetchType = ? AND status = 'success'").all(snapshotDate, fetchType).map((row) => row.etfCode));
+}
+
+async function etfDailyHoldingStatus() {
+  const target = await etfDailyRefreshTargetDate();
+  const rows = etfCategoryRowsFromDb();
+  if (!rows.length || !target.snapshotDate) {
+    return {
+      snapshotDate: target.snapshotDate || "",
+      targetReason: target.reason || "no-target",
+      totalEtfs: rows.length,
+      completedEtfs: 0,
+      missingEtfs: rows.length,
+      completionRatio: 0,
+      completionPercent: 0,
+      coverageTarget: ETF_DAILY_COVERAGE_TARGET,
+      coverageTargetMet: false,
+      refreshTimes: ETF_DAILY_REFRESH_TIMES,
+      fullRefreshTimes: ETF_DAILY_FULL_REFRESH_TIMES,
+      finalAttemptTime: ETF_DAILY_FINAL_TIME,
+      lastStatusUpdatedAt: "",
+      pendingEtfs: rows.slice(0, 50).map((row) => ({ code: row.code, name: row.name }))
+    };
+  }
+  const codes = rows.map((row) => row.code);
+  const placeholders = codes.map(() => "?").join(",");
+  const snapshotRows = db.prepare(`
+    SELECT DISTINCT etfCode
+    FROM etf_holding_snapshots
+    WHERE snapshotDate = ? AND etfCode IN (${placeholders})
+  `).all(target.snapshotDate, ...codes);
+  const completed = new Set(snapshotRows.map((row) => row.etfCode));
+  const statusRows = db.prepare(`
+    SELECT etfCode, status, errorMessage, updatedAt
+    FROM etf_holding_fetch_status
+    WHERE snapshotDate = ? AND fetchType = 'daily' AND etfCode IN (${placeholders})
+  `).all(target.snapshotDate, ...codes);
+  const statusByCode = new Map(statusRows.map((row) => [row.etfCode, row]));
+  const missingRows = rows.filter((row) => !completed.has(row.code));
+  const completedEtfs = completed.size;
+  const completionRatio = rows.length ? completedEtfs / rows.length : 0;
+  const lastStatusUpdatedAt = statusRows.reduce((latest, row) => {
+    if (!row.updatedAt) return latest;
+    return !latest || row.updatedAt > latest ? row.updatedAt : latest;
+  }, "");
+  return {
+    snapshotDate: target.snapshotDate,
+    targetReason: target.reason || "",
+    totalEtfs: rows.length,
+    completedEtfs,
+    missingEtfs: missingRows.length,
+    completionRatio: Number(completionRatio.toFixed(4)),
+    completionPercent: Number((completionRatio * 100).toFixed(1)),
+    coverageTarget: ETF_DAILY_COVERAGE_TARGET,
+    coverageTargetMet: completionRatio >= ETF_DAILY_COVERAGE_TARGET,
+    refreshTimes: ETF_DAILY_REFRESH_TIMES,
+    fullRefreshTimes: ETF_DAILY_FULL_REFRESH_TIMES,
+    finalAttemptTime: ETF_DAILY_FINAL_TIME,
+    lastStatusUpdatedAt,
+    failedDailyEtfs: statusRows.filter((row) => row.status === "failed").length,
+    pendingEtfs: missingRows.slice(0, 50).map((row) => {
+      const status = statusByCode.get(row.code);
+      return {
+        code: row.code,
+        name: row.name,
+        status: status?.status || "",
+        errorMessage: status?.errorMessage || "",
+        updatedAt: status?.updatedAt || ""
+      };
+    })
+  };
+}
+
+async function fetchAndStoreEtfHolding(etf, snapshotDate, fetchType, options = {}) {
+  try {
+    const loaded = await loadEtfHoldingsByPriority(etf, snapshotDate);
+    const holdings = loaded.holdings;
+    if (!holdings.length) throw new Error("未获取到 ETF 持仓明细");
+    const now = nowIso();
+    db.prepare("DELETE FROM etf_holding_snapshots WHERE etfCode = ? AND snapshotDate = ?").run(etf.code, snapshotDate);
+    const stmt = db.prepare(`
+      INSERT OR REPLACE INTO etf_holding_snapshots
+        (etfCode, snapshotDate, stockCode, stockName, weight, shares, marketValue, source, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    db.exec("BEGIN");
+    try {
+      for (const row of holdings) {
+        stmt.run(etf.code, snapshotDate, row.stockCode, row.stockName, row.weight, row.shares, row.marketValue, row.source || loaded.source, now);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    recordEtfFetchStatus(etf.code, snapshotDate, fetchType, "success", "");
+    return { ok: true, code: etf.code, name: etf.name, date: snapshotDate, count: holdings.length, source: loaded.source };
+  } catch (error) {
+    let message = readableError(error);
+    if (fetchType === "daily") {
+      const prefix = options.finalAttempt ? "final-missing" : "tushare-empty-pending";
+      message = `${prefix}: ${message}`;
+    }
+    recordEtfFetchStatus(etf.code, snapshotDate, fetchType, "failed", message);
+    return { ok: false, code: etf.code, name: etf.name, date: snapshotDate, errorMessage: message };
+  }
+}
+
+async function loadEtfHoldingsByPriority(etf, snapshotDate) {
+  const code = clean(etf.code);
+  const attempts = [];
+  const sources = [];
+  sources.push(["tushare-etf-cons", () => loadTushareEtfHoldings(code, snapshotDate)]);
+  if (isLikelySzseEtf(code)) {
+    sources.push(["szse-official-pcf", () => loadSzseOfficialPcfHoldings(code, snapshotDate)]);
+  } else if (isLikelySseEtf(code)) {
+    sources.push(["sse-official-pcf", () => loadSseOfficialPcfHoldings(code, snapshotDate)]);
+  } else {
+    sources.push(["szse-official-pcf", () => loadSzseOfficialPcfHoldings(code, snapshotDate)]);
+    sources.push(["sse-official-pcf", () => loadSseOfficialPcfHoldings(code, snapshotDate)]);
+  }
+  sources.push(["eastmoney-fund-archives", () => loadEastmoneyEtfHoldings(code, snapshotDate)]);
+  sources.push(["fund-company-pcf", () => loadFundCompanyPcfHoldings(code, snapshotDate)]);
+
+  for (const [source, loader] of sources) {
+    try {
+      const loaded = normalizeEtfHoldingLoad(await loader());
+      const holdings = await enrichEtfHoldingWeights(loaded.holdings, loaded.meta, snapshotDate);
+      if (holdings.length) return { source, holdings };
+      attempts.push(`${source}: 未获取到持仓明细`);
+    } catch (error) {
+      attempts.push(`${source}: ${readableError(error)}`);
+    }
+  }
+  throw new Error(`未获取到 ETF 持仓明细；${attempts.join("；")}`);
+}
+
+function normalizeEtfHoldingLoad(value) {
+  if (Array.isArray(value)) return { holdings: value, meta: {} };
+  return {
+    holdings: Array.isArray(value?.holdings) ? value.holdings : [],
+    meta: value?.meta || {}
+  };
+}
+
+function isLikelySzseEtf(code) {
+  return /^15[89]\d{3}$/.test(clean(code));
+}
+
+function isLikelySseEtf(code) {
+  return /^5\d{5}$/.test(clean(code));
+}
+
+function compactDateKey(date) {
+  return clean(date).replace(/-/g, "");
+}
+
+async function loadSzseOfficialPcfHoldings(code, snapshotDate) {
+  const compactDate = compactDateKey(snapshotDate);
+  const url = `https://www.szse.cn/reportdocs/files/text/ETFDown/pcf_${encodeURIComponent(code)}_${compactDate}.xml`;
+  const textValue = await fetchTextWithRetry(url, {
+    allowCurlFallback: true,
+    timeout: 12000,
+    headers: {
+      accept: "application/xml,text/xml,text/plain,*/*",
+      referer: "https://www.szse.cn/disclosure/fund/currency/index.html"
+    }
+  });
+  if (!/<PCFFile[\s>]/i.test(textValue)) throw new Error("深交所 PCF 返回内容不是 XML");
+  const tradingDay = xmlText(textValue, "TradingDay");
+  if (tradingDay && tradingDay !== compactDate) throw new Error(`深交所 PCF 交易日不匹配: ${tradingDay}`);
+  const navPerCu = parseNumberValue(xmlText(textValue, "NAVperCU"));
+  const rows = [...textValue.matchAll(/<Component>([\s\S]*?)<\/Component>/gi)].map((match) => ({
+    stockCode: xmlText(match[1], "UnderlyingSecurityID"),
+    stockName: xmlText(match[1], "UnderlyingSymbol"),
+    weight: null,
+    shares: parseNumberValue(xmlText(match[1], "ComponentShare")),
+    marketValue: null,
+    stockMarket: pcfStockMarket(xmlText(match[1], "UnderlyingSecurityID"), xmlText(match[1], "UnderlyingSecurityIDSource")),
+    source: "szse-official-pcf"
+  })).filter(isInvestablePcfHolding);
+  return { holdings: uniqBy(rows, (row) => row.stockCode), meta: { navPerCu } };
+}
+
+async function loadSseOfficialPcfHoldings(code, snapshotDate) {
+  const compactDate = compactDateKey(snapshotDate);
+  if (snapshotDate !== chinaDateKey()) throw new Error("上交所官方 PCF 当前公开接口不支持指定历史日期");
+  const url = `https://query.sse.com.cn/etfDownload/downloadETF2Bulletin.do?fundCode=${encodeURIComponent(code)}`;
+  const textValue = await fetchTextWithRetry(url, {
+    allowCurlFallback: true,
+    timeout: 12000,
+    headers: {
+      accept: "application/xml,text/xml,text/plain,*/*",
+      referer: `https://www.sse.com.cn/assortment/fund/list/etfinfo/basic/index.shtml?FUNDID=${encodeURIComponent(code)}`
+    }
+  });
+  if (!/<SSEPortfolioCompositionFile[\s>]/i.test(textValue)) throw new Error("上交所 PCF 返回内容不是 XML");
+  const tradingDay = xmlText(textValue, "TradingDay");
+  if (tradingDay !== compactDate) throw new Error(`上交所官方 PCF 仅返回最新交易日 ${tradingDay || "未知"}，无法回补 ${compactDate}`);
+  const navPerCu = parseNumberValue(xmlText(textValue, "NAVperCU"));
+  const rows = [...textValue.matchAll(/<Component>([\s\S]*?)<\/Component>/gi)].map((match) => ({
+    stockCode: xmlText(match[1], "InstrumentID"),
+    stockName: xmlText(match[1], "InstrumentName"),
+    weight: null,
+    shares: parseNumberValue(xmlText(match[1], "Quantity")),
+    marketValue: null,
+    stockMarket: pcfStockMarket(xmlText(match[1], "InstrumentID"), xmlText(match[1], "InstrumentIDSource")),
+    source: "sse-official-pcf"
+  })).filter(isInvestablePcfHolding);
+  return { holdings: uniqBy(rows, (row) => row.stockCode), meta: { navPerCu } };
+}
+
+async function loadEastmoneyEtfHoldings(code, snapshotDate = chinaDateKey()) {
+  if (snapshotDate !== chinaDateKey()) throw new Error("东方财富 F10 不支持指定历史日期");
+  const url = `https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code=${encodeURIComponent(code)}&topline=200&year=`;
+  const textValue = await fetchTextWithRetry(url, {
+    allowCurlFallback: true,
+    timeout: 12000,
+    headers: { referer: `https://fundf10.eastmoney.com/ccmx_${code}.html` }
+  });
+  return parseEastmoneyFundHoldings(textValue);
+}
+
+async function loadFundCompanyPcfHoldings() {
+  throw new Error("基金公司 PCF/公告源暂未接入");
+}
+
+async function loadTushareEtfHoldings(code, snapshotDate) {
+  if (!TUSHARE_TOKEN) throw new Error("未配置 TUSHARE_TOKEN");
+  const tsCode = tushareEtfTsCode(code);
+  const apiName = tsCode.endsWith(".SH") ? "etf_sh_cons" : "etf_sz_cons";
+  const rows = await fetchTushareApi(apiName, {
+    trade_date: compactDateKey(snapshotDate),
+    ts_code: tsCode
+  }, "trade_date,ts_code,con_code,con_name,qty,sub_flag,cpr,rdr,sca,exchange");
+  const holdings = rows.map((row) => {
+    const security = parseTushareSecurityCode(row.con_code, row.exchange);
+    return {
+      stockCode: security.code,
+      stockName: clean(row.con_name),
+      weight: null,
+      shares: numberOrNull(row.qty),
+      marketValue: null,
+      stockMarket: security.market,
+      source: "tushare-etf-cons"
+    };
+  }).filter(isInvestableTushareHolding);
+  return { holdings: uniqBy(holdings, (row) => `${row.stockMarket}:${row.stockCode}`), meta: { weightByTotalMarketValue: true } };
+}
+
+async function fetchTushareApi(apiName, params = {}, fields = "") {
+  const raw = await fetchJson(tushareApiEndpoint(apiName), {
+    method: "POST",
+    body: JSON.stringify({
+      api_name: apiName,
+      token: TUSHARE_TOKEN,
+      params,
+      fields
+    }),
+    timeout: 20000,
+    headers: {
+      "content-type": "application/json",
+      referer: "https://tushare.pro/"
+    }
+  });
+  if (raw?.code !== 0) throw new Error(`Tushare ${apiName} 返回异常: ${clean(raw?.msg || raw?.message || raw?.code)}`);
+  const fieldNames = Array.isArray(raw?.data?.fields) ? raw.data.fields : [];
+  const items = Array.isArray(raw?.data?.items) ? raw.data.items : [];
+  if (!items.length) throw new Error(`Tushare ${apiName} 无数据`);
+  return items.map((values) => Object.fromEntries(fieldNames.map((field, index) => [field, values[index]])));
+}
+
+function tushareApiEndpoint(apiName) {
+  if (/api\.tushare\.pro\/?$/i.test(TUSHARE_API_URL)) return TUSHARE_API_URL;
+  return `${TUSHARE_API_URL}/${encodeURIComponent(apiName)}`;
+}
+
+function tushareEtfTsCode(code) {
+  const cleanCode = clean(code).padStart(6, "0");
+  return `${cleanCode}.${isLikelySseEtf(cleanCode) ? "SH" : "SZ"}`;
+}
+
+function parseTushareSecurityCode(value, exchange = "") {
+  const textValue = clean(value);
+  const match = textValue.match(/^(\d{5,6})(?:\.(SH|SZ|HK))?$/i);
+  const code = match?.[1] || textValue.replace(/\D/g, "");
+  const suffix = (match?.[2] || clean(exchange)).toUpperCase();
+  let market = suffix === "HK" ? "HK" : suffix === "SH" ? "SH" : suffix === "SZ" ? "SZ" : pcfStockMarket(code, suffix);
+  if (!market && /^\d{5}$/.test(code)) market = "HK";
+  return { code, market };
+}
+
+async function fetchTextWithRetry(url, options = {}) {
+  const attempts = Math.max(1, Number(options.attempts || 3) || 3);
+  const retryDelay = Math.max(100, Number(options.retryDelay || 600) || 600);
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fetchText(url, options);
+    } catch (error) {
+      lastError = error;
+      const message = readableError(error);
+      if (/^404\b/.test(message) || /^403\b/.test(message)) break;
+      if (attempt < attempts) await wait(retryDelay * attempt);
+    }
+  }
+  throw lastError;
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function xmlText(xml, tag) {
+  const match = String(xml || "").match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "i"));
+  return cleanHtml(match?.[1] || "");
+}
+
+function parseNumberValue(value) {
+  const num = Number(clean(value).replace(/,/g, ""));
+  return Number.isFinite(num) ? num : null;
+}
+
+function parseEastmoneyFundHoldings(textValue) {
+  const html = String(textValue || "")
+    .replace(/\\r/g, "\r")
+    .replace(/\\n/g, "\n")
+    .replace(/\\"/g, '"')
+    .replace(/\\\//g, "/");
+  const rows = [];
+  const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let match;
+  while ((match = rowRegex.exec(html))) {
+    const cells = [...match[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map((cell) => cleanHtml(cell[1]));
+    const joined = cells.join(" ");
+    const code = cells.find((cell) => /^\d{6}$/.test(cell)) || (joined.match(/\b\d{6}\b/) || [])[0];
+    if (!code || cells.some((cell) => /股票代码|序号/.test(cell))) continue;
+    const weightText = cells.find((cell) => /%$/.test(cell));
+    const weight = parsePercentNumber(weightText);
+    const name = cells.find((cell) => cell && !/^\d+$/.test(cell) && !/%$/.test(cell) && !/^\d+(?:\.\d+)?$/.test(cell)) || "";
+    rows.push({
+      stockCode: code,
+      stockName: name,
+      weight,
+      shares: null,
+      marketValue: null,
+      source: "eastmoney-fund-archives"
+    });
+  }
+  return uniqBy(rows.filter((row) => row.weight != null || row.stockName), (row) => row.stockCode);
+}
+
+function isInvestablePcfHolding(row) {
+  if (!row.stockCode || !row.stockName) return false;
+  if (Number(row.shares) <= 0) return false;
+  if (/申赎现金|现金|Cash/i.test(row.stockName)) return false;
+  return true;
+}
+
+function isInvestableTushareHolding(row) {
+  if (!row.stockCode || !row.stockName) return false;
+  if (Number(row.shares) <= 0) return false;
+  if (/现金|Cash/i.test(row.stockName)) return false;
+  return true;
+}
+
+function pcfStockMarket(stockCode, sourceCode = "") {
+  const code = clean(stockCode);
+  const source = clean(sourceCode);
+  if (source === "103" || /^\d{5}$/.test(code)) return "HK";
+  if (source === "102" || /^[03]\d{5}$/.test(code)) return "SZ";
+  if (source === "101" || /^6\d{5}$/.test(code)) return "SH";
+  return inferMarket(code);
+}
+
+const etfQuoteCache = new Map();
+
+async function enrichEtfHoldingWeights(holdings, meta = {}, snapshotDate = chinaDateKey()) {
+  const navPerCu = numberOrNull(meta.navPerCu);
+  const shouldUseMarketTotal = Boolean(meta.weightByTotalMarketValue);
+  if ((!navPerCu || navPerCu <= 0) && !shouldUseMarketTotal) return holdings;
+  const candidates = holdings.filter((row) => row.weight == null && row.shares != null && Number(row.shares) > 0);
+  if (!candidates.length) return holdings;
+  if (shouldUseMarketTotal) {
+    await enrichEtfLatestQuotesBatch(candidates);
+  } else {
+    await mapWithConcurrency(candidates, 8, async (row) => {
+      try {
+        const quote = await loadEtfComponentQuote(row.stockCode, row.stockMarket, snapshotDate);
+        applyEtfQuoteToHolding(row, quote, navPerCu);
+      } catch {
+        // 权重增强失败时保留 PCF 成分，避免影响新进/剔除统计。
+      }
+    });
+  }
+  if ((!navPerCu || navPerCu <= 0) && shouldUseMarketTotal) {
+    const totalMarketValue = holdings.reduce((sum, row) => sum + (numberOrNull(row.marketValue) || 0), 0);
+    if (totalMarketValue > 0) {
+      for (const row of holdings) {
+        const marketValue = numberOrNull(row.marketValue);
+        if (row.weight == null && marketValue != null && marketValue > 0) row.weight = marketValue / totalMarketValue * 100;
+      }
+    }
+  }
+  return holdings;
+}
+
+function applyEtfQuoteToHolding(row, quote, navPerCu = null) {
+  if (quote?.price == null) return;
+  const fxRate = quote.currency === "HKD" ? ETF_HKD_CNY_RATE : 1;
+  const marketValue = Number(row.shares) * quote.price * fxRate;
+  if (!Number.isFinite(marketValue) || marketValue <= 0) return;
+  row.marketValue = marketValue;
+  if (navPerCu && navPerCu > 0) row.weight = marketValue / navPerCu * 100;
+  row.source = `${row.source || "pcf"}+eastmoney-quote`;
+}
+
+async function enrichEtfLatestQuotesBatch(rows) {
+  const requests = [];
+  const rowMap = new Map();
+  for (const row of rows) {
+    const market = pcfStockMarket(row.stockCode, row.stockMarket);
+    const code = clean(row.stockCode).padStart(market === "HK" ? 5 : 6, "0");
+    const secid = market === "HK" ? `116.${code}` : eastmoneySecidFromSymbol(code, market);
+    if (!secid) continue;
+    requests.push({ secid, market });
+    if (!rowMap.has(secid)) rowMap.set(secid, []);
+    rowMap.get(secid).push(row);
+  }
+  const quotes = await fetchEtfLatestQuotesBatch(requests);
+  for (const [secid, quote] of quotes.entries()) {
+    for (const row of rowMap.get(secid) || []) applyEtfQuoteToHolding(row, quote);
+  }
+}
+
+async function fetchEtfLatestQuotesBatch(requests) {
+  const unique = [];
+  const seen = new Set();
+  for (const request of requests) {
+    if (seen.has(request.secid)) continue;
+    seen.add(request.secid);
+    unique.push(request);
+  }
+  const result = new Map();
+  for (let index = 0; index < unique.length; index += 80) {
+    const chunk = unique.slice(index, index + 80);
+    const marketBySecid = new Map(chunk.map((item) => [item.secid, item.market]));
+    try {
+      const raw = await fetchJson(`https://push2delay.eastmoney.com/api/qt/ulist.np/get?fltt=2&invt=2&fields=f12,f13,f14,f2&secids=${encodeURIComponent(chunk.map((item) => item.secid).join(","))}`, {
+        allowCurlFallback: true,
+        timeout: 12000,
+        headers: { referer: "https://quote.eastmoney.com/" }
+      });
+      for (const item of raw?.data?.diff || []) {
+        const secid = `${item.f13}.${item.f12}`;
+        const price = numberOrNull(item.f2);
+        if (price == null) continue;
+        result.set(secid, { price, currency: marketBySecid.get(secid) === "HK" ? "HKD" : "CNY" });
+      }
+    } catch {
+      // 批量行情失败时保留持仓明细，避免影响其他 ETF。
+    }
+  }
+  return result;
+}
+
+async function loadEtfComponentQuote(stockCode, market, snapshotDate) {
+  const normalizedMarket = pcfStockMarket(stockCode, market);
+  const cacheKey = `${snapshotDate}:${normalizedMarket}:${clean(stockCode)}`;
+  if (etfQuoteCache.has(cacheKey)) return etfQuoteCache.get(cacheKey);
+  const promise = fetchEtfComponentQuote(stockCode, normalizedMarket, snapshotDate);
+  etfQuoteCache.set(cacheKey, promise);
+  return promise;
+}
+
+async function fetchEtfComponentQuote(stockCode, market, snapshotDate) {
+  const code = clean(stockCode).padStart(market === "HK" ? 5 : 6, "0");
+  const secid = market === "HK" ? `116.${code}` : eastmoneySecidFromSymbol(code, market);
+  if (!secid) throw new Error("无法识别成分股市场");
+  const compactDate = compactDateKey(snapshotDate);
+  const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${encodeURIComponent(secid)}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58&klt=101&fqt=1&beg=${compactDate}&end=${compactDate}`;
+  let raw;
+  try {
+    raw = await fetchJson(url, {
+      allowCurlFallback: true,
+      timeout: 10000,
+      headers: { referer: "https://quote.eastmoney.com/" }
+    });
+  } catch {
+    return fetchEtfComponentLatestQuote(secid, market);
+  }
+  const line = raw?.data?.klines?.[0];
+  if (!line) return fetchEtfComponentLatestQuote(secid, market);
+  const parts = String(line).split(",");
+  const price = numberOrNull(parts[2]);
+  if (price == null) return fetchEtfComponentLatestQuote(secid, market);
+  return { price, currency: market === "HK" ? "HKD" : "CNY" };
+}
+
+async function fetchEtfComponentLatestQuote(secid, market) {
+  const raw = await fetchJson(`https://push2delay.eastmoney.com/api/qt/stock/get?fltt=2&invt=2&secid=${encodeURIComponent(secid)}&fields=f43,f57,f58,f60,f152`, {
+    allowCurlFallback: true,
+    timeout: 10000,
+    headers: { referer: "https://quote.eastmoney.com/" }
+  });
+  const price = numberOrNull(raw?.data?.f43);
+  if (price == null) throw new Error("成分股价格为空");
+  return { price, currency: market === "HK" ? "HKD" : "CNY" };
+}
+
+function parsePercentNumber(value) {
+  const textValue = clean(value).replace("%", "");
+  const num = Number(textValue);
+  return Number.isFinite(num) ? num : null;
+}
+
+function recordEtfFetchStatus(etfCode, snapshotDate, fetchType, status, errorMessage = "") {
+  const now = nowIso();
+  db.prepare(`
+    INSERT INTO etf_holding_fetch_status (etfCode, snapshotDate, fetchType, status, errorMessage, createdAt, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(etfCode, snapshotDate, fetchType)
+    DO UPDATE SET status = excluded.status, errorMessage = excluded.errorMessage, updatedAt = excluded.updatedAt
+  `).run(etfCode, snapshotDate, fetchType, status, errorMessage, now, now);
+}
+
+function etfFetchSummary(results, snapshotDate, requestedEtfs) {
+  return {
+    snapshotDate,
+    requestedEtfs,
+    success: results.filter((item) => item.ok).length,
+    failed: results.filter((item) => !item.ok).length,
+    failures: results.filter((item) => !item.ok)
+  };
+}
+
+async function etfHoldingChanges({ primary = "", secondary = "", period = ETF_DEFAULT_PERIOD } = {}) {
+  const safePeriod = ETF_HOLDING_PERIODS.includes(Number(period)) ? Number(period) : ETF_DEFAULT_PERIOD;
+  const etfs = etfsForCategory(clean(primary), clean(secondary));
+  if (!etfs.length) throw new Error("当前分类下没有 ETF");
+  const etfCodes = etfs.map((row) => row.code);
+  const latestDate = latestEtfSnapshotDate(etfCodes);
+  if (!latestDate) return emptyEtfChanges(etfs, safePeriod, "暂无 ETF 持仓快照，请先刷新最新持仓");
+  const compareDate = compareEtfSnapshotDate(etfCodes, latestDate, safePeriod);
+  if (!compareDate) return emptyEtfChanges(etfs, safePeriod, "历史快照不足，无法对比", latestDate);
+  const latestRowsRaw = etfSnapshotRows(etfCodes, latestDate);
+  const previousRowsRaw = etfSnapshotRows(etfCodes, compareDate);
+  const latestRows = filterEtfChangeRows(latestRowsRaw);
+  const previousRows = filterEtfChangeRows(previousRowsRaw);
+  const etfByCode = Object.fromEntries(etfs.map((row) => [row.code, row]));
+  const previousMap = new Map(previousRows.map((row) => [`${row.etfCode}:${row.stockCode}`, row]));
+  const latestMap = new Map(latestRows.map((row) => [`${row.etfCode}:${row.stockCode}`, row]));
+  const newEntries = [];
+  const growth5Entries = [];
+  const growth10Entries = [];
+  for (const latest of latestRows) {
+    const previous = previousMap.get(`${latest.etfCode}:${latest.stockCode}`);
+    const oldWeight = previous ? numberOrNull(previous.weight) : null;
+    const latestWeight = numberOrNull(latest.weight);
+    const change = latestWeight == null ? null : latestWeight - (oldWeight == null ? 0 : oldWeight);
+    const detail = etfHoldingDetail(latest, previous, etfByCode[latest.etfCode], oldWeight, latestWeight, change);
+    if (!previous) newEntries.push(detail);
+    if (change != null && change >= 5) growth5Entries.push(detail);
+    if (change != null && change >= 10) growth10Entries.push(detail);
+  }
+  const removedEntries = [];
+  for (const previous of previousRows) {
+    if (latestMap.has(`${previous.etfCode}:${previous.stockCode}`)) continue;
+    removedEntries.push(etfHoldingDetail(null, previous, etfByCode[previous.etfCode], numberOrNull(previous.weight), null, null));
+  }
+  const latestEtfs = new Set(latestRowsRaw.map((row) => row.etfCode));
+  const previousEtfs = new Set(previousRowsRaw.map((row) => row.etfCode));
+  const failedStatuses = etfFetchFailures(etfCodes, latestDate);
+  return {
+    primary,
+    secondary,
+    period: safePeriod,
+    latestDate,
+    compareDate,
+    requestedEtfs: etfs.length,
+    latestEtfs: latestEtfs.size,
+    compareEtfs: previousEtfs.size,
+    partial: failedStatuses.length > 0 || latestEtfs.size < etfs.length || previousEtfs.size < etfs.length,
+    coverageMessage: [
+      latestEtfs.size < etfs.length || previousEtfs.size < etfs.length ? "部分 ETF 缺少可用快照，统计为部分覆盖" : "",
+      latestRowsRaw.length !== latestRows.length || previousRowsRaw.length !== previousRows.length
+        ? `已过滤东财兜底源中低于 ${ETF_ARCHIVE_MIN_CHANGE_WEIGHT}% 的小权重持仓`
+        : ""
+    ].filter(Boolean).join("；"),
+    failures: failedStatuses,
+    summary: {
+      newStocks: await aggregateEtfStockChanges(newEntries, compareDate, latestDate),
+      growth5: await aggregateEtfStockChanges(growth5Entries, compareDate, latestDate),
+      growth10: await aggregateEtfStockChanges(growth10Entries, compareDate, latestDate),
+      removed: await aggregateEtfStockChanges(removedEntries, compareDate, latestDate)
+    }
+  };
+}
+
+function filterEtfChangeRows(rows) {
+  return rows.filter((row) => !isLowWeightArchiveHolding(row));
+}
+
+function isLowWeightArchiveHolding(row) {
+  if (!clean(row.source).startsWith("eastmoney-fund-archives")) return false;
+  const weight = numberOrNull(row.weight);
+  return weight == null || weight < ETF_ARCHIVE_MIN_CHANGE_WEIGHT;
+}
+
+function emptyEtfChanges(etfs, period, message, latestDate = "") {
+  return {
+    period,
+    latestDate,
+    compareDate: "",
+    requestedEtfs: etfs.length,
+    latestEtfs: 0,
+    compareEtfs: 0,
+    partial: true,
+    coverageMessage: message,
+    failures: [],
+    summary: { newStocks: [], growth5: [], growth10: [], removed: [] }
+  };
+}
+
+function latestEtfSnapshotDate(etfCodes) {
+  if (!etfCodes.length) return "";
+  const placeholders = etfCodes.map(() => "?").join(",");
+  const row = db.prepare(`SELECT MAX(snapshotDate) AS snapshotDate FROM etf_holding_snapshots WHERE etfCode IN (${placeholders})`).get(...etfCodes);
+  return row?.snapshotDate || "";
+}
+
+function compareEtfSnapshotDate(etfCodes, latestDate, period) {
+  const placeholders = etfCodes.map(() => "?").join(",");
+  const dates = db.prepare(`
+    SELECT DISTINCT snapshotDate FROM etf_holding_snapshots
+    WHERE etfCode IN (${placeholders}) AND snapshotDate < ?
+    ORDER BY snapshotDate DESC
+  `).all(...etfCodes, latestDate).map((row) => row.snapshotDate);
+  return dates[Math.min(Math.max(0, period - 1), dates.length - 1)] || dates.at(-1) || "";
+}
+
+function etfSnapshotRows(etfCodes, snapshotDate) {
+  if (!etfCodes.length || !snapshotDate) return [];
+  const placeholders = etfCodes.map(() => "?").join(",");
+  return db.prepare(`
+    SELECT etfCode, snapshotDate, stockCode, stockName, weight, shares, marketValue, source
+    FROM etf_holding_snapshots
+    WHERE snapshotDate = ? AND etfCode IN (${placeholders})
+  `).all(snapshotDate, ...etfCodes);
+}
+
+function etfHoldingDetail(latest, previous, etf, oldWeight, latestWeight, change) {
+  const row = latest || previous;
+  const status = latest && !previous ? "新进"
+    : !latest && previous ? "剔除/清仓"
+      : change > 0 ? "增加"
+        : change < 0 ? "减少" : "不变";
+  return {
+    stockCode: row.stockCode,
+    stockName: clean(latest?.stockName || previous?.stockName || row.stockCode),
+    etfCode: row.etfCode,
+    etfName: etf?.name || row.etfCode,
+    oldWeight,
+    latestWeight,
+    weightChange: change,
+    status
+  };
+}
+
+async function aggregateEtfStockChanges(entries, compareDate = "", latestDate = "") {
+  const grouped = new Map();
+  for (const entry of entries) {
+    const key = entry.stockCode;
+    if (!grouped.has(key)) grouped.set(key, { stockCode: entry.stockCode, stockName: entry.stockName, details: [] });
+    grouped.get(key).details.push(entry);
+  }
+  const rows = [...grouped.values()].map((group) => {
+    const stockName = bestEtfStockName(group.stockCode, group.details.map((item) => item.stockName).find((name) => !isNoisyStockName(name)) || group.stockName);
+    const latestWeights = group.details.map((item) => numberOrNull(item.latestWeight)).filter((value) => value != null);
+    const changes = group.details.map((item) => numberOrNull(item.weightChange)).filter((value) => value != null);
+    return {
+      stockCode: group.stockCode,
+      stockName,
+      etf_count: group.details.length,
+      avg_latest_weight: average(latestWeights),
+      avg_weight_change: average(changes),
+      details: group.details
+        .map((item) => ({ ...item, stockName: isNoisyStockName(item.stockName) ? stockName : item.stockName }))
+        .sort((a, b) => (numberOrNull(b.weightChange) ?? -Infinity) - (numberOrNull(a.weightChange) ?? -Infinity))
+    };
+  });
+  const periodReturns = await mapWithConcurrency(rows, 6, (row) => loadEtfStockPeriodReturn(row.stockCode, compareDate, latestDate));
+  rows.forEach((row, index) => {
+    const periodReturn = periodReturns[index] || {};
+    row.period_change_percent = periodReturn.changePercent ?? null;
+    row.period_start_date = periodReturn.startDate || "";
+    row.period_end_date = periodReturn.endDate || "";
+  });
+  return rows.sort((a, b) => b.etf_count - a.etf_count || (numberOrNull(b.avg_weight_change) ?? -Infinity) - (numberOrNull(a.avg_weight_change) ?? -Infinity));
+}
+
+const etfStockNameCache = new Map();
+const etfStockPeriodReturnCache = new Map();
+
+async function loadEtfStockPeriodReturn(stockCode, compareDate, latestDate) {
+  const code = clean(stockCode);
+  const startDate = clean(compareDate);
+  const endDate = clean(latestDate);
+  if (!code || !startDate || !endDate) return null;
+  const cacheKey = `${code}:${startDate}:${endDate}`;
+  if (etfStockPeriodReturnCache.has(cacheKey)) return etfStockPeriodReturnCache.get(cacheKey);
+  const promise = fetchEtfStockPeriodReturn(code, startDate, endDate).catch(() => null);
+  etfStockPeriodReturnCache.set(cacheKey, promise);
+  return promise;
+}
+
+async function fetchEtfStockPeriodReturn(stockCode, compareDate, latestDate) {
+  const market = pcfStockMarket(stockCode);
+  const code = clean(stockCode).padStart(market === "HK" ? 5 : 6, "0");
+  const secid = market === "HK" ? `116.${code}` : eastmoneySecidFromSymbol(code, market);
+  if (!secid) return null;
+  const begin = compactDateKey(dateKeyOffset(compareDate, -14));
+  const end = compactDateKey(latestDate);
+  const query = `/api/qt/stock/kline/get?secid=${encodeURIComponent(secid)}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58&klt=101&fqt=1&beg=${begin}&end=${end}`;
+  const raw = await fetchEastmoneyHistoryJson(query);
+  const rows = (raw?.data?.klines || []).map(parseEtfStockKlineRow).filter(Boolean);
+  if (!rows.length) return null;
+  const start = lastEtfStockKlineAtOrBefore(rows, compareDate);
+  const finish = lastEtfStockKlineAtOrBefore(rows, latestDate);
+  if (!start?.close || !finish?.close || start.close <= 0) return null;
+  return {
+    startDate: start.date,
+    endDate: finish.date,
+    startClose: start.close,
+    endClose: finish.close,
+    changePercent: (finish.close - start.close) / start.close * 100
+  };
+}
+
+function parseEtfStockKlineRow(line) {
+  const parts = String(line || "").split(",");
+  const date = clean(parts[0]);
+  const close = numberOrNull(parts[2]);
+  if (!date || close == null) return null;
+  return { date, close };
+}
+
+function lastEtfStockKlineAtOrBefore(rows, dateKey) {
+  const target = clean(dateKey);
+  let selected = null;
+  for (const row of rows) {
+    if (row.date <= target) selected = row;
+  }
+  return selected;
+}
+
+function dateKeyOffset(dateKey, days) {
+  const date = dateFromChinaKey(dateKey);
+  return chinaDateKey(new Date(date.getTime() + Number(days || 0) * 24 * 60 * 60 * 1000));
+}
+
+function bestEtfStockName(stockCode, fallback = "") {
+  const code = clean(stockCode);
+  const cleanFallback = clean(fallback);
+  if (!code) return cleanFallback;
+  if (etfStockNameCache.has(code)) return etfStockNameCache.get(code) || cleanFallback;
+  const rows = db.prepare(`
+    SELECT stockName, COUNT(*) AS count
+    FROM etf_holding_snapshots
+    WHERE stockCode = ?
+      AND stockName <> ''
+      AND stockName NOT GLOB '[0-9]*'
+    GROUP BY stockName
+    ORDER BY count DESC
+    LIMIT 5
+  `).all(code);
+  const best = rows.map((row) => clean(row.stockName)).find((name) => !isNoisyStockName(name)) || cleanFallback;
+  etfStockNameCache.set(code, best);
+  return best;
+}
+
+function isNoisyStockName(value) {
+  const textValue = clean(value);
+  return !textValue || textValue === "--" || /^\d+\*?$/.test(textValue) || /^\d+(?:\.\d+)?%?$/.test(textValue);
+}
+
+function average(values) {
+  if (!values.length) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function etfFetchFailures(etfCodes, latestDate) {
+  if (!etfCodes.length || !latestDate) return [];
+  const placeholders = etfCodes.map(() => "?").join(",");
+  return db.prepare(`
+    SELECT s.etfCode, c.name AS etfName, s.snapshotDate, s.fetchType, s.errorMessage
+    FROM etf_holding_fetch_status s
+    LEFT JOIN etf_categories c ON c.code = s.etfCode
+    WHERE s.snapshotDate = ? AND s.status = 'failed' AND s.etfCode IN (${placeholders})
+    ORDER BY s.updatedAt DESC
+    LIMIT 80
+  `).all(latestDate, ...etfCodes);
 }
 
 function numberOrNull(value) {
@@ -4441,6 +5592,67 @@ async function handleApi(req, res, url) {
       const body = await readBody(req);
       const targetUserId = targetUserIdForRequest(user, url, body);
       return json(res, 200, { data: { exists: true, ...saveSectorFlowPreference(targetUserId, body) }, userId: targetUserId, updatedAt: nowIso(), stale: false });
+    } catch (error) {
+      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+    }
+  }
+
+  if (url.pathname === "/api/etf-categories" && req.method === "GET") {
+    try {
+      requireAdmin(user);
+      return json(res, 200, { data: etfCategoryTree(), updatedAt: nowIso(), stale: false });
+    } catch (error) {
+      const status = error.message === "需要管理员权限" ? 403 : 500;
+      return json(res, status, { data: { categories: [], total: 0 }, message: readableError(error), errorMessage: readableError(error), stale: true });
+    }
+  }
+
+  if (url.pathname === "/api/etf-holdings/changes" && req.method === "GET") {
+    try {
+      requireAdmin(user);
+      const primary = clean(url.searchParams.get("primary") || "");
+      const secondary = clean(url.searchParams.get("secondary") || "");
+      const period = Number(url.searchParams.get("period") || ETF_DEFAULT_PERIOD);
+      return json(res, 200, { data: await etfHoldingChanges({ primary, secondary, period }), updatedAt: nowIso(), stale: false });
+    } catch (error) {
+      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+    }
+  }
+
+  if (url.pathname === "/api/etf-holdings/daily-status" && req.method === "GET") {
+    try {
+      requireAdmin(user);
+      return json(res, 200, { data: await etfDailyHoldingStatus(), updatedAt: nowIso(), stale: false });
+    } catch (error) {
+      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+    }
+  }
+
+  if (url.pathname === "/api/etf-holdings/refresh" && req.method === "POST") {
+    try {
+      requireAdmin(user);
+      const body = await readBody(req);
+      const data = await refreshEtfHoldings({
+        primary: body.primary || url.searchParams.get("primary") || "",
+        secondary: body.secondary || url.searchParams.get("secondary") || "",
+        fetchType: "manual"
+      });
+      return json(res, 200, { data, updatedAt: nowIso(), stale: false });
+    } catch (error) {
+      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+    }
+  }
+
+  if (url.pathname === "/api/etf-holdings/backfill" && req.method === "POST") {
+    try {
+      requireAdmin(user);
+      const body = await readBody(req);
+      const data = await backfillEtfHoldings({
+        primary: body.primary || url.searchParams.get("primary") || "",
+        secondary: body.secondary || url.searchParams.get("secondary") || "",
+        days: body.days || url.searchParams.get("days") || ETF_BACKFILL_DAYS
+      });
+      return json(res, 200, { data, updatedAt: nowIso(), stale: false });
     } catch (error) {
       return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
     }
@@ -5540,4 +6752,5 @@ server.listen(PORT, HOST, () => {
   console.log(`Dashboard running at http://${HOST}:${PORT}`);
   if (!existsSync(dbPath)) console.log(`SQLite database will be created at ${dbPath}`);
   scheduleDailyReportTimer();
+  scheduleEtfHoldingRefreshTimer();
 });
