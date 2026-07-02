@@ -3261,17 +3261,25 @@ function listDailyReportUsers() {
     .map((row) => ({ ...publicUser(row), reportSettings: normalizeReportSettings(row) }));
 }
 
-async function generateWatchlistDailyReport(userId) {
+async function generateWatchlistDailyReport(userOrId) {
+  const userId = typeof userOrId === "object" ? userOrId.id : userOrId;
+  const includeEtfHoldings = Boolean(typeof userOrId === "object" && userOrId.isAdmin);
   const items = await listWatchlistDetailed(userId);
   if (!items.length) throw new Error("暂无自选股可生成日报");
-  const enriched = await Promise.all(items.map(async (item) => {
+  const enriched = (await mapWithConcurrency(items, includeEtfHoldings ? 3 : 8, async (item) => {
     const announcements = await cached(`announcements:${item.symbol}:8`, 300_000, () => loadStockAnnouncements(item.symbol, 8))
       .catch((error) => ({ data: [], stale: true, errorMessage: readableError(error) }));
+    const etfHoldings = includeEtfHoldings
+      ? await cached(`report-etf-holdings:${item.symbol}:30`, 21_600_000, () => etfStockHoldingLookup({ stock: item.symbol, period: 30 }))
+        .catch((error) => ({ errorMessage: readableError(error) }))
+      : null;
     return {
       ...item,
-      announcements: recentAnnouncementItems(announcements.data || [])
+      announcements: recentAnnouncementItems(announcements.data || []),
+      etfHoldings
     };
-  }));
+  })).filter(Boolean);
+  if (!enriched.length) throw new Error("暂无可生成日报的自选股数据");
   return renderWatchlistDailyReport(enriched);
 }
 
@@ -3320,6 +3328,8 @@ function renderWatchlistDailyReport(items) {
     const announcements = (item.announcements || []).map((row) => row.title).filter(Boolean).slice(0, 2).join("；");
     lines.push(`- ${item.name || item.symbol} ${item.symbol}：${formatReportPrice(item.price)}，${formatReportPercent(item.changePercent)}；今 ${formatReportSignedMoney(item.todayProfit)}，总 ${formatReportSignedMoney(item.totalProfit)}${tags ? `；${tags}` : ""}`);
     if (announcements) lines.push(`  公告：${announcements}`);
+    const etfLines = reportEtfHoldingText(item.etfHoldings);
+    if (etfLines.length) lines.push(...etfLines);
   }
   if (items.length > 20) lines.push(`还有 ${items.length - 20} 只自选股，请打开看板查看。`);
   const link = PUBLIC_BASE_URL || "";
@@ -3414,6 +3424,57 @@ function reportStockCardHtml(item) {
       </div>
       ${tags.length ? `<div style="margin-top:8px;">${tags.map((tag) => `<span style="display:inline-block;margin:0 5px 5px 0;padding:3px 7px;border:1px solid #fed7aa;border-radius:999px;background:#fff7ed;color:#9a3412;font-size:12px;font-weight:800;">${escapeReportHtml(tag)}</span>`).join("")}</div>` : ""}
       ${reportInfoLines("公告", announcements)}
+      ${reportEtfHoldingHtml(item.etfHoldings)}
+    </div>`;
+}
+
+function hasReportEtfHoldings(data) {
+  return Boolean(data && !data.errorMessage && Number(data.holdingEtfs || 0) > 0);
+}
+
+function reportEtfHoldingText(data) {
+  if (!hasReportEtfHoldings(data)) return [];
+  const lines = [
+    `  ETF：${data.holdingEtfs}只持有｜平均占比 ${formatReportPercent(data.avgLatestWeight)}｜持仓资金 ${formatReportMoney(data.totalHoldingValue)}｜占总市值 ${formatReportPercent(data.stockMarketValueRatio)}`
+  ];
+  const periods = Array.isArray(data.periodSummaries) ? data.periodSummaries.slice(0, 4) : [];
+  if (periods.length) {
+    lines.push(`  ETF对比：${periods.map((item) => `${item.period}日 持仓${formatReportPercent(item.avgWeightChange)} 股价${formatReportPercent(item.periodChangePercent)}`).join("；")}`);
+  }
+  return lines;
+}
+
+function reportEtfHoldingHtml(data) {
+  if (!hasReportEtfHoldings(data)) return "";
+  const periods = Array.isArray(data.periodSummaries) ? data.periodSummaries.slice(0, 4) : [];
+  const metric = (label, value, trend = "") => `
+    <td style="padding:8px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc;">
+      <div style="font-size:11px;color:#64748b;font-weight:800;">${escapeReportHtml(label)}</div>
+      <div style="margin-top:3px;font-size:15px;font-weight:900;color:${reportTrendColor(trend)};">${escapeReportHtml(value)}</div>
+    </td>`;
+  return `
+    <div style="margin-top:10px;padding-top:9px;border-top:1px solid #edf2f5;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
+        <div style="font-size:13px;font-weight:900;color:#0f7f70;">ETF 持仓</div>
+        <div style="font-size:12px;font-weight:900;color:#0f766e;border:1px solid #ccfbf1;background:#f0fdfa;border-radius:999px;padding:2px 7px;">${escapeReportHtml(data.holdingEtfs)} 只ETF持有</div>
+      </div>
+      <div style="font-size:12px;color:#64748b;margin-bottom:8px;">最新 ${escapeReportHtml(data.latestDate || "--")} · 四周期对比</div>
+      <table role="presentation" cellspacing="6" cellpadding="0" style="width:100%;border-collapse:separate;border-spacing:6px;margin:-6px;">
+        <tr>
+          ${metric("平均占比", formatReportPercent(data.avgLatestWeight), data.avgLatestWeight)}
+          ${metric("持仓资金", formatReportMoney(data.totalHoldingValue))}
+          ${metric("占总市值", formatReportPercent(data.stockMarketValueRatio), data.stockMarketValueRatio)}
+        </tr>
+      </table>
+      ${periods.length ? `<table role="presentation" cellspacing="6" cellpadding="0" style="width:100%;border-collapse:separate;border-spacing:6px;margin:8px -6px -6px;">
+        ${periods.map((item, index) => `${index % 2 === 0 ? "<tr>" : ""}
+          <td style="width:50%;padding:8px;border:1px solid #e2e8f0;border-radius:8px;background:#fbfdfe;">
+            <div style="font-size:12px;color:#64748b;font-weight:800;">${escapeReportHtml(item.period)}日 · 对比 ${escapeReportHtml(item.compareDate || "--")} · ${escapeReportHtml(item.comparableEtfs ?? "--")}只可比</div>
+            <div style="margin-top:4px;font-size:13px;font-weight:900;color:${reportTrendColor(item.avgWeightChange)};">持仓 ${escapeReportHtml(formatReportPercent(item.avgWeightChange))}</div>
+            <div style="margin-top:2px;font-size:13px;font-weight:900;color:${reportTrendColor(item.periodChangePercent)};">股价 ${escapeReportHtml(formatReportPercent(item.periodChangePercent))}</div>
+          </td>
+        ${index % 2 === 1 || index === periods.length - 1 ? "</tr>" : ""}`).join("")}
+      </table>` : ""}
     </div>`;
 }
 
@@ -3499,7 +3560,7 @@ async function sendWatchlistDailyReport(user, options = {}) {
   }
   const channels = enabledReportChannels(settings);
   if (!channels.length) throw new Error("未配置可用发送渠道");
-  const report = await generateWatchlistDailyReport(user.id);
+  const report = await generateWatchlistDailyReport(user);
   const attempts = [];
   for (const channel of channels) {
     try {
