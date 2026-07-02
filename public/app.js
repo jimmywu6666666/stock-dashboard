@@ -45,6 +45,7 @@ const state = {
   etfStockQuery: "",
   etfStockSelected: null,
   etfStockHoldings: emptyEnvelope(null),
+  etfWatchHoldings: emptyEnvelope(null),
   etfStockSuggestions: { query: "", results: emptyEnvelope([]) },
   etfExpandedStocks: new Set(),
   etfChangeSort: {},
@@ -1356,6 +1357,18 @@ async function loadEtfStockHoldings(options = {}) {
   }
 }
 
+async function loadEtfWatchHoldings(options = {}) {
+  if (!options.silent) setLoading("etfWatchHoldings", true);
+  try {
+    state.etfWatchHoldings = await api(watchlistPath("/api/etf-holdings/watchlist"));
+  } catch (error) {
+    state.etfWatchHoldings = { ...state.etfWatchHoldings, stale: true, errorMessage: error.message };
+  } finally {
+    if (!options.silent) setLoading("etfWatchHoldings", false);
+    else renderAfterAutoRefresh();
+  }
+}
+
 async function loadNationalTeam(options = {}) {
   await loadNationalTeamOverview(options);
   if (state.ntHasQueried) await loadNationalTeamPositions(options);
@@ -1524,6 +1537,12 @@ function clearEtfStockLookup() {
   state.etfStockHoldings = emptyEnvelope(null);
   state.loading.delete("etfStockSuggestions");
   state.loading.delete("etfStockHoldings");
+  render();
+}
+
+function clearEtfWatchHoldings() {
+  state.etfWatchHoldings = emptyEnvelope(null);
+  state.loading.delete("etfWatchHoldings");
   render();
 }
 
@@ -2575,6 +2594,8 @@ function bindEvents() {
   });
   document.querySelectorAll("[data-etf-stock-suggest]").forEach((el) => el.addEventListener("click", () => chooseEtfStockSuggestion(el.dataset.etfStockSuggest)));
   document.querySelectorAll("[data-etf-stock-clear]").forEach((el) => el.addEventListener("click", clearEtfStockLookup));
+  document.querySelectorAll("[data-etf-watch-holdings]").forEach((el) => el.addEventListener("click", () => loadEtfWatchHoldings()));
+  document.querySelectorAll("[data-etf-watch-clear]").forEach((el) => el.addEventListener("click", clearEtfWatchHoldings));
   document.querySelectorAll("[data-etf-stock-toggle]").forEach((el) => el.addEventListener("click", () => toggleEtfStock(el.dataset.etfStockToggle)));
   document.querySelectorAll("[data-nt-filter]").forEach((el) => el.addEventListener("change", () => changeNationalTeamFilter(el.dataset.ntFilter, el.value)));
   document.querySelectorAll("[data-nt-search-form]").forEach((el) => el.addEventListener("submit", submitNationalTeamSearch));
@@ -4823,18 +4844,24 @@ function etfHoldingsTemplate() {
 
 function etfStockLookupTemplate() {
   const data = state.etfStockHoldings.data;
+  const watchData = state.etfWatchHoldings.data;
   const suggestions = state.etfStockSuggestions.results.data || [];
   const suggestError = state.etfStockSuggestions.results.errorMessage;
   const showSuggestions = state.etfStockSuggestions.query && (suggestions.length || state.loading.has("etfStockSuggestions") || suggestError);
   const selected = state.etfStockSelected;
   const canQuery = Boolean(selected) && !state.loading.has("etfStockHoldings");
   const canClear = Boolean(state.etfStockQuery || selected || data || state.etfStockHoldings.errorMessage || suggestions.length);
+  const hasWatchResult = Boolean(watchData || state.etfWatchHoldings.errorMessage);
   return `
     <section class="etf-stock-lookup">
       <header class="etf-section-head">
         <div>
           <strong>个股 ETF 持仓查询</strong>
           <small>先从候选中选定股票，再查看该股被哪些行业 ETF 持有。</small>
+        </div>
+        <div class="etf-section-actions">
+          <button type="button" data-etf-watch-holdings ${state.loading.has("etfWatchHoldings") ? "disabled" : ""}>${state.loading.has("etfWatchHoldings") ? "查询中" : "一键查看自选股 ETF 持仓"}</button>
+          ${hasWatchResult ? `<button type="button" class="ghost-button" data-etf-watch-clear>清空自选股结果</button>` : ""}
         </div>
       </header>
       <form class="etf-stock-lookup-form" data-etf-stock-query-form>
@@ -4849,6 +4876,9 @@ function etfStockLookupTemplate() {
       ${state.etfStockHoldings.errorMessage ? `<p class="warning">${escapeHtml(state.etfStockHoldings.errorMessage)}</p>` : ""}
       ${state.loading.has("etfStockHoldings") && !data ? `<div class="chart-empty">个股 ETF 持仓查询中...</div>` : ""}
       ${data ? etfStockLookupResult(data) : ""}
+      ${state.etfWatchHoldings.errorMessage ? `<p class="warning">${escapeHtml(state.etfWatchHoldings.errorMessage)}</p>` : ""}
+      ${state.loading.has("etfWatchHoldings") && !watchData ? `<div class="chart-empty">正在汇总自选股 ETF 持仓...</div>` : ""}
+      ${watchData ? etfWatchHoldingsResult(watchData) : ""}
     </section>
   `;
 }
@@ -4874,11 +4904,12 @@ function etfStockSuggestionList(suggestions, errorMessage) {
   `;
 }
 
-function etfStockLookupResult(data) {
+function etfStockLookupResult(data, options = {}) {
+  const showDetails = options.showDetails !== false;
   const details = data.details || [];
   const periodSummaries = data.periodSummaries || [];
   return `
-    <div class="etf-stock-result">
+    <div class="etf-stock-result ${showDetails ? "" : "etf-stock-result-summary"}">
       <header>
         <div>
           <strong>${escapeHtml(data.stockName || data.stockCode)}</strong>
@@ -4902,9 +4933,29 @@ function etfStockLookupResult(data) {
           `).join("")}
         </div>
       ` : ""}
-      ${details.length ? etfStockHoldingDetailsTable(details) : emptyState("当前 ETF 池最新快照未持有该股票")}
-      ${data.removedEtfs?.length ? `<details class="etf-failures"><summary>对比期曾持有但最新未持有 ${escapeHtml(data.removedEtfs.length)} 只</summary><ul>${data.removedEtfs.slice(0, 20).map((item) => `<li>${escapeHtml(item.etfCode)} ${escapeHtml(item.etfName || "")}：旧占比 ${formatPercent(item.oldWeight)}</li>`).join("")}</ul></details>` : ""}
+      ${showDetails ? (details.length ? etfStockHoldingDetailsTable(details) : emptyState("当前 ETF 池最新快照未持有该股票")) : ""}
+      ${showDetails && data.removedEtfs?.length ? `<details class="etf-failures"><summary>对比期曾持有但最新未持有 ${escapeHtml(data.removedEtfs.length)} 只</summary><ul>${data.removedEtfs.slice(0, 20).map((item) => `<li>${escapeHtml(item.etfCode)} ${escapeHtml(item.etfName || "")}：旧占比 ${formatPercent(item.oldWeight)}</li>`).join("")}</ul></details>` : ""}
     </div>
+  `;
+}
+
+function etfWatchHoldingsResult(data) {
+  const items = data.items || [];
+  return `
+    <section class="etf-watch-holdings-result">
+      <header>
+        <div>
+          <strong>自选股 ETF 持仓概览</strong>
+          <small>自选股 ${escapeHtml(data.total || 0)} 只 · ETF 持有 ${escapeHtml(data.matched || 0)} 只 · 未命中 ${escapeHtml(data.missingCount || 0)} 只</small>
+        </div>
+        ${data.latestDate ? `<span>最新 ${escapeHtml(data.latestDate)}</span>` : ""}
+      </header>
+      ${items.length ? `
+        <div class="etf-watch-holdings-grid">
+          ${items.map((item) => etfStockLookupResult(item, { showDetails: false })).join("")}
+        </div>
+      ` : emptyState("当前自选股里没有被 ETF 池最新快照持有的股票")}
+    </section>
   `;
 }
 

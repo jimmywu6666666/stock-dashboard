@@ -1379,6 +1379,36 @@ textarea {
   font-weight: 650;
 }
 
+.etf-section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.etf-section-actions button {
+  min-height: 34px;
+  border: 1px solid #2563eb;
+  border-radius: 7px;
+  background: #2563eb;
+  color: #fff;
+  padding: 7px 12px;
+  font-size: 13px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.etf-section-actions .ghost-button {
+  border-color: var(--line);
+  background: #fff;
+  color: var(--muted);
+}
+
+.etf-section-actions button:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
 .etf-stock-lookup-form {
   display: flex;
   flex-wrap: wrap;
@@ -1514,6 +1544,10 @@ textarea {
   padding: 10px;
 }
 
+.etf-stock-result-summary {
+  height: 100%;
+}
+
 .etf-stock-result header {
   display: flex;
   justify-content: space-between;
@@ -1562,6 +1596,40 @@ textarea {
 .etf-stock-period b {
   font-size: 13px;
   font-weight: 850;
+}
+
+.etf-watch-holdings-result {
+  display: grid;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.etf-watch-holdings-result > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.etf-watch-holdings-result > header strong {
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 900;
+}
+
+.etf-watch-holdings-result > header small,
+.etf-watch-holdings-result > header span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.etf-watch-holdings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 10px;
 }
 
 .etf-note,

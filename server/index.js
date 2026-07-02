@@ -3304,6 +3304,7 @@ function renderWatchlistDailyReport(items) {
   const totalProfitPercent = totalCost ? totalProfit / totalCost * 100 : null;
   const sortedByChange = [...items].sort((a, b) => Number(b.changePercent ?? -9999) - Number(a.changePercent ?? -9999));
   const sortedByTodayProfit = [...withPosition].sort((a, b) => Number(b.todayProfit ?? -Infinity) - Number(a.todayProfit ?? -Infinity));
+  const etfHoldingItems = items.filter((item) => hasReportEtfHoldings(item.etfHoldings));
   const summary = {
     reportDate,
     itemCount: items.length,
@@ -3320,9 +3321,22 @@ function renderWatchlistDailyReport(items) {
     "",
     `涨幅靠前：${sortedByChange.slice(0, 3).map((item) => `${item.name || item.symbol} ${formatReportPercent(item.changePercent)}`).join("；") || "暂无"}`,
     `今日盈亏靠前：${sortedByTodayProfit.slice(0, 3).map((item) => `${item.name || item.symbol} ${formatReportSignedMoney(item.todayProfit)}`).join("；") || "暂无持仓"}`,
-    "",
-    "个股摘要："
+    ""
   ];
+  if (etfHoldingItems.length) {
+    lines.push(
+      "ETF持仓概览（管理员）：",
+      ...etfHoldingItems.slice(0, 8).map((item) => {
+        const data = item.etfHoldings;
+        const periods = Array.isArray(data.periodSummaries) ? data.periodSummaries.slice(0, 4) : [];
+        return `- ${item.name || item.symbol}：${data.holdingEtfs}只ETF持有｜平均占比 ${formatReportPercent(data.avgLatestWeight)}｜持仓资金 ${formatReportMoney(data.totalHoldingValue)}｜占总市值 ${formatReportPercent(data.stockMarketValueRatio)}${periods.length ? `｜${periods.map((row) => `${row.period}日持仓${formatReportPercent(row.avgWeightChange)}/股价${formatReportPercent(row.periodChangePercent)}`).join("；")}` : ""}`;
+      }),
+      ""
+    );
+  }
+  lines.push(
+    "个股摘要："
+  );
   for (const item of items.slice(0, 20)) {
     const tags = (item.tags || []).slice(0, 3).join("/");
     const announcements = (item.announcements || []).map((row) => row.title).filter(Boolean).slice(0, 2).join("；");
@@ -3349,6 +3363,7 @@ function renderWatchlistDailyReportHtml({ summary, items, sortedByChange, sorted
   const topChange = sortedByChange.slice(0, 5);
   const topProfit = sortedByTodayProfit.slice(0, 5);
   const visibleItems = items.slice(0, 20);
+  const etfHoldingItems = visibleItems.filter((item) => hasReportEtfHoldings(item.etfHoldings));
   const stat = (label, value, trend = "") => `
     <td style="padding:10px;border:1px solid #dbe5ea;border-radius:8px;background:#fbfdfe;">
       <div style="font-size:12px;color:#64748b;font-weight:700;">${escapeReportHtml(label)}</div>
@@ -3377,6 +3392,7 @@ function renderWatchlistDailyReportHtml({ summary, items, sortedByChange, sorted
           </table>
           ${rankingBlock("涨幅靠前", topChange.map((item) => `${item.name || item.symbol} ${formatReportPercent(item.changePercent)}`))}
           ${rankingBlock("今日盈亏靠前", topProfit.map((item) => `${item.name || item.symbol} ${formatReportSignedMoney(item.todayProfit)}`))}
+          ${reportEtfHoldingOverviewHtml(etfHoldingItems)}
           <h2 style="margin:18px 0 10px;font-size:18px;color:#14212b;">个股摘要</h2>
           ${visibleItems.map(reportStockCardHtml).join("")}
           ${items.length > visibleItems.length ? `<p style="margin:12px 0 0;color:#64748b;">还有 ${items.length - visibleItems.length} 只自选股，请打开看板查看。</p>` : ""}
@@ -3430,6 +3446,31 @@ function reportStockCardHtml(item) {
 
 function hasReportEtfHoldings(data) {
   return Boolean(data && !data.errorMessage && Number(data.holdingEtfs || 0) > 0);
+}
+
+function reportEtfHoldingOverviewHtml(items) {
+  if (!items.length) return "";
+  return `
+    <div style="margin-top:16px;padding:12px;border:1px solid #ccfbf1;border-radius:10px;background:#f0fdfa;">
+      <div style="font-size:15px;font-weight:900;color:#0f7f70;margin-bottom:8px;">ETF持仓概览（管理员）</div>
+      ${items.slice(0, 10).map((item) => {
+        const data = item.etfHoldings;
+        const periods = Array.isArray(data.periodSummaries) ? data.periodSummaries.slice(0, 4) : [];
+        return `
+          <div style="padding:9px 0;border-top:1px solid #ccfbf1;">
+            <div style="font-size:15px;font-weight:900;color:#14212b;">${escapeReportHtml(item.name || item.symbol)} <span style="font-size:12px;color:#64748b;font-weight:800;">${escapeReportHtml(item.symbol)}</span></div>
+            <div style="margin-top:4px;font-size:13px;line-height:1.6;color:#334155;">
+              <b style="color:#0f766e;">${escapeReportHtml(data.holdingEtfs)}只ETF持有</b>
+              ｜平均占比 <b>${escapeReportHtml(formatReportPercent(data.avgLatestWeight))}</b>
+              ｜持仓资金 <b>${escapeReportHtml(formatReportMoney(data.totalHoldingValue))}</b>
+              ｜占总市值 <b>${escapeReportHtml(formatReportPercent(data.stockMarketValueRatio))}</b>
+            </div>
+            ${periods.length ? `<div style="margin-top:5px;font-size:12px;line-height:1.6;color:#64748b;">
+              ${periods.map((row) => `<span style="display:inline-block;margin:0 8px 3px 0;">${escapeReportHtml(row.period)}日：持仓 <b style="color:${reportTrendColor(row.avgWeightChange)};">${escapeReportHtml(formatReportPercent(row.avgWeightChange))}</b>，股价 <b style="color:${reportTrendColor(row.periodChangePercent)};">${escapeReportHtml(formatReportPercent(row.periodChangePercent))}</b></span>`).join("")}
+            </div>` : ""}
+          </div>`;
+      }).join("")}
+    </div>`;
 }
 
 function reportEtfHoldingText(data) {
@@ -5504,6 +5545,68 @@ async function etfStockHoldingLookup({ stock = "", period = ETF_DEFAULT_PERIOD }
   };
 }
 
+function watchlistEtfStockQuery(item = {}) {
+  const symbol = clean(item.symbol).toUpperCase();
+  const market = clean(item.market).toUpperCase();
+  const digits = symbol.match(/\d{5,6}/)?.[0] || symbol;
+  if (market === "HK" && /^\d{1,5}$/.test(digits)) return digits.padStart(5, "0");
+  if (/^\d{5,6}$/.test(digits)) return digits;
+  return clean(item.name) || symbol;
+}
+
+function etfStockHoldingSummaryPayload(result = {}) {
+  const { details, removedEtfs, ...summary } = result;
+  return summary;
+}
+
+async function etfWatchlistHoldingLookup(userId) {
+  const items = listWatchlist(userId);
+  if (!items.length) return { total: 0, matched: 0, missingCount: 0, items: [], missing: [] };
+  const rows = await mapWithConcurrency(items, 3, async (item) => {
+    const query = watchlistEtfStockQuery(item);
+    try {
+      const result = await etfStockHoldingLookup({ stock: query, period: ETF_DEFAULT_PERIOD });
+      const summary = {
+        ...etfStockHoldingSummaryPayload(result),
+        watchlistId: item.id,
+        watchlistSymbol: item.symbol,
+        watchlistName: item.name,
+        watchlistMarket: item.market,
+        sortOrder: item.sortOrder
+      };
+      return { ok: Number(summary.holdingEtfs || 0) > 0, item, summary };
+    } catch (error) {
+      return { ok: false, item, errorMessage: readableError(error) };
+    }
+  });
+  const validRows = rows.filter(Boolean);
+  const holdings = validRows
+    .filter((row) => row.ok)
+    .map((row) => row.summary)
+    .sort((a, b) => {
+      const valueDiff = (numberOrNull(b.totalHoldingValue) ?? -Infinity) - (numberOrNull(a.totalHoldingValue) ?? -Infinity);
+      if (valueDiff) return valueDiff;
+      return (Number(b.holdingEtfs) || 0) - (Number(a.holdingEtfs) || 0);
+    });
+  const missing = validRows
+    .filter((row) => !row.ok)
+    .map((row) => ({
+      id: row.item.id,
+      symbol: row.item.symbol,
+      name: row.item.name,
+      market: row.item.market,
+      reason: row.errorMessage || "当前 ETF 池最新快照未持有"
+    }));
+  return {
+    total: items.length,
+    matched: holdings.length,
+    missingCount: missing.length,
+    latestDate: holdings[0]?.latestDate || "",
+    items: holdings,
+    missing
+  };
+}
+
 function etfStockSuggestions(queryInput, limitInput = 10) {
   const query = clean(queryInput);
   if (!query || query.length < 2) return [];
@@ -6931,6 +7034,16 @@ async function handleApi(req, res, url) {
       return json(res, 200, { data: await etfStockHoldingLookup({ stock, period }), updatedAt: nowIso(), stale: false });
     } catch (error) {
       return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+    }
+  }
+
+  if (url.pathname === "/api/etf-holdings/watchlist" && req.method === "GET") {
+    try {
+      requireAdmin(user);
+      const targetUserId = targetUserIdForRequest(user, url);
+      return json(res, 200, { data: await etfWatchlistHoldingLookup(targetUserId), userId: targetUserId, updatedAt: nowIso(), stale: false });
+    } catch (error) {
+      return json(res, error.message === "需要管理员权限" ? 403 : 400, { message: readableError(error), errorMessage: readableError(error) });
     }
   }
 
