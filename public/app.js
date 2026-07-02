@@ -63,6 +63,7 @@ const state = {
   ntExpandedSymbol: "",
   watchlist: [],
   adminUsers: emptyEnvelope([]),
+  tushareStatus: emptyEnvelope(null),
   reportSettings: emptyEnvelope(null),
   reportSettingsOpen: false,
   reportMessage: "",
@@ -135,12 +136,13 @@ const bootTaskDefinitions = [
   ["posts", "股吧帖子"],
   ["reportSettings", "收盘日报"],
   ["adminUsers", "管理员数据"],
+  ["tushareStatus", "Tushare状态"],
   ["dsaHistory", "AI 分析历史"]
 ];
 
 function visibleBootTaskDefinitions() {
   return bootTaskDefinitions.filter(([key]) => {
-    if (key === "adminUsers") return Boolean(state.user?.isAdmin);
+    if (key === "adminUsers" || key === "tushareStatus") return Boolean(state.user?.isAdmin);
     if (key === "nationalTeam" || key === "etfCategories" || key === "etfDailyStatus") return hasVipFeature();
     return true;
   });
@@ -268,6 +270,7 @@ function bootTaskHasDegraded(key) {
     posts: () => hasError(state.posts.guba),
     reportSettings: () => hasError(state.reportSettings),
     adminUsers: () => state.user?.isAdmin && hasError(state.adminUsers),
+    tushareStatus: () => state.user?.isAdmin && hasError(state.tushareStatus),
     dsaHistory: () => state.dsaConfig.data?.configured && hasError(state.dsaHistory)
   };
   return taskErrors[key]?.() || false;
@@ -437,6 +440,18 @@ async function loadAdminUsers() {
     state.adminUsers = { ...state.adminUsers, stale: true, errorMessage: error.message };
   } finally {
     setLoading("adminUsers", false);
+  }
+}
+
+async function loadTushareStatus() {
+  if (!state.user?.isAdmin) return;
+  setLoading("tushareStatus", true);
+  try {
+    state.tushareStatus = await api("/api/admin/data-sources/tushare/status");
+  } catch (error) {
+    state.tushareStatus = { ...state.tushareStatus, stale: true, errorMessage: error.message };
+  } finally {
+    setLoading("tushareStatus", false);
   }
 }
 
@@ -1892,6 +1907,7 @@ async function refreshAll(options = {}) {
     loadWatchlist(),
     loadReportSettings(),
     loadAdminUsers(),
+    state.user?.isAdmin ? loadTushareStatus() : Promise.resolve(),
     state.dsaConfig.data?.configured ? loadDsaHistory({ silent: true }) : Promise.resolve()
   ]);
 }
@@ -1922,6 +1938,7 @@ async function refreshAllWithBootProgress(options = {}) {
     runBootTask("posts", () => state.selectedSymbol ? loadPosts(state.selectedSymbol) : Promise.resolve()),
     runBootTask("reportSettings", () => loadReportSettings()),
     state.user?.isAdmin ? runBootTask("adminUsers", () => loadAdminUsers()) : Promise.resolve(),
+    state.user?.isAdmin ? runBootTask("tushareStatus", () => loadTushareStatus()) : Promise.resolve(),
     runBootTask("dsaHistory", () => state.dsaConfig.data?.configured ? loadDsaHistory({ silent: true }) : Promise.resolve())
   ]);
 }
@@ -5785,6 +5802,7 @@ function formatFixed(value, digits = 2) {
 function adminPanelTemplate() {
   const users = state.adminUsers.data || [];
   return `
+    ${tushareStatusTemplate()}
     <form id="admin-create-form" class="admin-create-form">
       <input name="displayName" placeholder="名称，如 张三" required />
       <input name="username" placeholder="新用户名" required />
@@ -5808,6 +5826,32 @@ function adminPanelTemplate() {
         ${users.map(adminUserItem).join("") || emptyState("暂无用户")}
       </div>
     ` : ""}
+  `;
+}
+
+function tushareStatusTemplate() {
+  const payload = state.tushareStatus.data;
+  if (!state.user?.isAdmin || !payload) return "";
+  const stockBasic = payload.caches?.stockBasic || {};
+  const tradeCalendar = payload.caches?.tradeCalendar || {};
+  const statuses = Array.isArray(payload.statuses) ? payload.statuses : [];
+  const warning = payload.configured ? statuses.find((item) => item.status && !["success"].includes(item.status)) : { message: "未配置 TUSHARE_TOKEN" };
+  return `
+    <section class="tushare-status-card ${payload.configured ? "" : "warning"}">
+      <div>
+        <strong>Tushare 数据源</strong>
+        <span>${payload.configured ? "已配置" : "未配置"}</span>
+      </div>
+      <div>
+        <strong>股票基础</strong>
+        <span>${formatCount(stockBasic.total)} 条 · ${formatDateTime(stockBasic.updatedAt) || "未同步"}</span>
+      </div>
+      <div>
+        <strong>交易日历</strong>
+        <span>${formatCount(tradeCalendar.total)} 条 · ${formatDateTime(tradeCalendar.updatedAt) || "未同步"}</span>
+      </div>
+      ${warning ? `<p>${escapeHtml(warning.message || warning.status || "数据源有降级")}</p>` : ""}
+    </section>
   `;
 }
 

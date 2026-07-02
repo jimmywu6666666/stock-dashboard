@@ -295,6 +295,36 @@ db.exec(`
     updatedAt TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS tushare_stock_basic_cache (
+    tsCode TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    name TEXT NOT NULL,
+    market TEXT NOT NULL,
+    area TEXT NOT NULL DEFAULT '',
+    industry TEXT NOT NULL DEFAULT '',
+    listDate TEXT NOT NULL DEFAULT '',
+    updatedAt TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_tushare_stock_basic_symbol ON tushare_stock_basic_cache(symbol);
+  CREATE INDEX IF NOT EXISTS idx_tushare_stock_basic_name ON tushare_stock_basic_cache(name);
+
+  CREATE TABLE IF NOT EXISTS tushare_trade_calendar_cache (
+    calDate TEXT PRIMARY KEY,
+    isOpen INTEGER NOT NULL DEFAULT 0,
+    pretradeDate TEXT NOT NULL DEFAULT '',
+    exchange TEXT NOT NULL DEFAULT 'SSE',
+    updatedAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS tushare_source_status (
+    key TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    total INTEGER NOT NULL DEFAULT 0,
+    updatedAt TEXT NOT NULL
+  );
+
 `);
 
 ensureUserDisplayNameColumn();
@@ -307,6 +337,8 @@ ensureDefaultUser();
 const cache = new Map();
 const staleCache = new Map();
 let sectorHistoryDisabledUntil = 0;
+let tushareStockBasicRefreshPromise = null;
+let tushareTradeCalendarRefreshPromise = null;
 
 function nowIso() {
   return new Date().toISOString();
@@ -679,6 +711,29 @@ function readableError(error) {
   return error?.message ? String(error.message).slice(0, 180) : "数据源暂时不可用";
 }
 
+function recordTushareStatus(key, status, message = "", total = 0) {
+  db.prepare(`
+    INSERT INTO tushare_source_status (key, status, message, total, updatedAt)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET
+      status = excluded.status,
+      message = excluded.message,
+      total = excluded.total,
+      updatedAt = excluded.updatedAt
+  `).run(clean(key), clean(status), clean(message).slice(0, 180), Number(total) || 0, nowIso());
+}
+
+function getTushareStatusRows() {
+  const rows = db.prepare("SELECT key, status, message, total, updatedAt FROM tushare_source_status ORDER BY key ASC").all();
+  return rows.map((row) => ({
+    key: row.key,
+    status: row.status,
+    message: row.message || "",
+    total: Number(row.total || 0),
+    updatedAt: row.updatedAt || ""
+  }));
+}
+
 function uniqBy(rows, keyFor) {
   const seen = new Set();
   const result = [];
@@ -1010,6 +1065,10 @@ function isOutsideAshareTradingSession() {
 
 function ashareSessionState() {
   const now = new Date();
+  const today = chinaDateKey(now);
+  const calendarState = cachedAshareTradingDayState(today);
+  if (calendarState === false) return "closed";
+  if (calendarState == null) refreshTushareTradeCalendarIfNeeded({ background: true });
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Shanghai",
     weekday: "short",
@@ -1035,8 +1094,15 @@ function isChinaWeekend(date = new Date()) {
 }
 
 async function isAshareTradingDayForDailyReport() {
-  if (isChinaWeekend()) return { tradingDay: false, reason: "weekend" };
   const today = chinaDateParts().full;
+  const calendarState = cachedAshareTradingDayState(today);
+  if (calendarState != null) return { tradingDay: calendarState, reason: "tushare-trade-cal-cache" };
+  const refreshed = await refreshTushareTradeCalendarIfNeeded({ force: true, background: false }).catch(() => null);
+  if (refreshed) {
+    const refreshedState = cachedAshareTradingDayState(today);
+    if (refreshedState != null) return { tradingDay: refreshedState, reason: "tushare-trade-cal-refresh" };
+  }
+  if (isChinaWeekend()) return { tradingDay: false, reason: "weekend" };
   try {
     const pair = await loadIndexTurnoverPair("1.000001");
     const latestDate = clean(pair?.latestDate || "");
@@ -1047,6 +1113,75 @@ async function isAshareTradingDayForDailyReport() {
   } catch (error) {
     console.warn(`daily report trading-day check failed; fail open: ${readableError(error)}`);
     return { tradingDay: true, reason: "calendar-check-failed-open" };
+  }
+}
+
+function cachedAshareTradingDayState(dateKey = chinaDateKey()) {
+  const compact = compactDateKey(dateKey);
+  const row = db.prepare("SELECT isOpen FROM tushare_trade_calendar_cache WHERE calDate = ?").get(compact);
+  if (row) return Number(row.isOpen) === 1;
+  return null;
+}
+
+async function refreshTushareTradeCalendarIfNeeded(options = {}) {
+  if (!TUSHARE_TOKEN) {
+    recordTushareStatus("trade_cal", "not-configured", "未配置 TUSHARE_TOKEN", 0);
+    return null;
+  }
+  const { updatedAt, total } = tushareCacheUpdatedAt("tushare_trade_calendar_cache");
+  const todayCompact = compactDateKey(chinaDateKey());
+  const todayExists = db.prepare("SELECT calDate FROM tushare_trade_calendar_cache WHERE calDate = ?").get(todayCompact);
+  const age = updatedAt ? Date.now() - new Date(updatedAt).getTime() : Infinity;
+  const stale = !total || !todayExists || !Number.isFinite(age) || age > 7 * 24 * 60 * 60 * 1000;
+  if (!options.force && !stale) return { skipped: true, reason: "fresh-cache", total };
+  if (tushareTradeCalendarRefreshPromise) return options.background ? { pending: true } : tushareTradeCalendarRefreshPromise;
+  tushareTradeCalendarRefreshPromise = refreshTushareTradeCalendarCache()
+    .finally(() => { tushareTradeCalendarRefreshPromise = null; });
+  if (options.background) {
+    tushareTradeCalendarRefreshPromise.catch((error) => console.warn("tushare trade_cal background refresh failed:", readableError(error)));
+    return { pending: true };
+  }
+  return tushareTradeCalendarRefreshPromise;
+}
+
+async function refreshTushareTradeCalendarCache() {
+  const today = chinaDateKey();
+  const rows = await fetchTushareApiWithStatus(
+    "trade_cal",
+    {
+      exchange: "SSE",
+      start_date: compactDateKey(dateKeyOffset(today, -45)),
+      end_date: compactDateKey(dateKeyOffset(today, 370))
+    },
+    "exchange,cal_date,is_open,pretrade_date",
+    "trade_cal"
+  );
+  const now = nowIso();
+  db.exec("BEGIN");
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO tushare_trade_calendar_cache (calDate, isOpen, pretradeDate, exchange, updatedAt)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(calDate) DO UPDATE SET
+        isOpen = excluded.isOpen,
+        pretradeDate = excluded.pretradeDate,
+        exchange = excluded.exchange,
+        updatedAt = excluded.updatedAt
+    `);
+    let count = 0;
+    for (const row of rows) {
+      const calDate = clean(row.cal_date);
+      if (!/^\d{8}$/.test(calDate)) continue;
+      stmt.run(calDate, Number(row.is_open) === 1 ? 1 : 0, clean(row.pretrade_date), clean(row.exchange || "SSE"), now);
+      count += 1;
+    }
+    db.exec("COMMIT");
+    recordTushareStatus("trade_cal", "success", "", count);
+    return { total: count, updatedAt: now };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    recordTushareStatus("trade_cal", "failed", readableError(error), 0);
+    throw error;
   }
 }
 
@@ -1208,6 +1343,19 @@ async function loadStockMinuteChart(secid, info) {
 }
 
 async function loadStockKlineChart(secid, info, period) {
+  if (TUSHARE_TOKEN && ["SH", "SZ"].includes(info.market) && isOutsideAshareTradingSession()) {
+    const tushareRows = await loadTushareKlineRows(info.symbol, info.market, period).catch(() => []);
+    if (tushareRows.length) {
+      return {
+        symbol: info.symbol,
+        name: info.name,
+        market: info.market,
+        period,
+        source: "tushare",
+        rows: tushareRows.slice(-90)
+      };
+    }
+  }
   const klt = period === "weekly" ? 102 : period === "monthly" ? 103 : 101;
   const end = new Date().toISOString().slice(0, 10).replaceAll("-", "");
   const begin = period === "monthly" ? "20180101" : "20250101";
@@ -1248,6 +1396,26 @@ async function loadStockKlineChart(secid, info, period) {
     period,
     rows
   };
+}
+
+async function loadTushareKlineRows(symbol, market, period) {
+  const apiName = period === "weekly" ? "weekly" : period === "monthly" ? "monthly" : "daily";
+  const today = chinaDateKey();
+  const rows = await fetchTushareApiWithStatus(apiName, {
+    ts_code: `${clean(symbol).padStart(6, "0")}.${market}`,
+    start_date: compactDateKey(dateKeyOffset(today, period === "monthly" ? -1800 : -520)),
+    end_date: compactDateKey(today)
+  }, "ts_code,trade_date,open,high,low,close,vol,amount", `kline_${apiName}`);
+  return rows.map((row) => ({
+    time: dashDateKey(row.trade_date),
+    open: numberOrNull(row.open),
+    close: numberOrNull(row.close),
+    high: numberOrNull(row.high),
+    low: numberOrNull(row.low),
+    volume: numberOrNull(row.vol),
+    amount: numberOrNull(row.amount)
+  })).filter((item) => item.time && item.open != null && item.close != null && item.high != null && item.low != null)
+    .sort((a, b) => a.time.localeCompare(b.time));
 }
 
 async function loadSinaKlineRows(symbol, market, period) {
@@ -1667,6 +1835,7 @@ async function loadStockRealtimeQuote(symbolInput) {
   const price = priceValue(data.f43);
   const previousClose = priceValue(data.f60);
   const change = priceValue(data.f169) ?? (price != null && previousClose != null ? price - previousClose : null);
+  const basic = await loadTushareDailyBasic(info.symbol, info.market).catch(() => null);
   return {
     symbol: info.symbol,
     name: clean(data.f58 || info.name),
@@ -1680,12 +1849,29 @@ async function loadStockRealtimeQuote(symbolInput) {
     previousClose,
     volume: numberOrNull(data.f47),
     amount: numberOrNull(data.f48),
-    turnoverRate: numberOrNull(data.f168),
-    totalMarketValue: numberOrNull(data.f116),
-    circulatingMarketValue: numberOrNull(data.f117),
-    peDynamic: numberOrNull(data.f162),
+    turnoverRate: numberOrNull(data.f168) ?? basic?.turnoverRate ?? null,
+    totalMarketValue: numberOrNull(data.f116) ?? basic?.totalMarketValue ?? null,
+    circulatingMarketValue: numberOrNull(data.f117) ?? basic?.circulatingMarketValue ?? null,
+    peDynamic: numberOrNull(data.f162) ?? basic?.peDynamic ?? null,
     updatedAt: nowIso(),
-    source: "东方财富实时行情"
+    source: basic ? "东方财富实时行情 + Tushare基础指标" : "东方财富实时行情"
+  };
+}
+
+async function loadTushareDailyBasic(symbol, market, targetDate = chinaDateKey()) {
+  if (!TUSHARE_TOKEN || !["SH", "SZ"].includes(market)) return null;
+  const row = await fetchLatestTushareValue("daily_basic", {
+    ts_code: `${clean(symbol).padStart(6, "0")}.${market}`,
+    start_date: compactDateKey(dateKeyOffset(targetDate, -14)),
+    end_date: compactDateKey(targetDate)
+  }, "ts_code,trade_date,turnover_rate,total_mv,circ_mv,pe_ttm", "trade_date", targetDate);
+  if (!row) return null;
+  return {
+    tradeDate: dashDateKey(row.trade_date),
+    turnoverRate: numberOrNull(row.turnover_rate),
+    totalMarketValue: numberOrNull(row.total_mv) != null ? numberOrNull(row.total_mv) * 10000 : null,
+    circulatingMarketValue: numberOrNull(row.circ_mv) != null ? numberOrNull(row.circ_mv) * 10000 : null,
+    peDynamic: numberOrNull(row.pe_ttm)
   };
 }
 
@@ -2650,6 +2836,11 @@ async function mapWithConcurrency(items, limit, mapper) {
 async function searchStocks(queryInput, limit) {
   const input = clean(queryInput).toUpperCase();
   if (!input) return [];
+  const tushareMatches = await searchTushareStockBasic(input, limit).catch(() => []);
+  if (tushareMatches.length) {
+    refreshTushareStockBasicCacheIfNeeded({ background: true });
+    return tushareMatches;
+  }
   const poolEnvelope = await cached("a-share-stock-pool", 600_000, loadAShareStockPool);
   const pool = Array.isArray(poolEnvelope.data) ? poolEnvelope.data : [];
   const query = normalizeSearchText(input);
@@ -2667,6 +2858,110 @@ async function searchStocks(queryInput, limit) {
     .map(searchStockRow)
     .filter((item) => item.symbol && item.name && ["SH", "SZ"].includes(item.market)), (item) => item.symbol)
     .slice(0, limit);
+}
+
+async function searchTushareStockBasic(queryInput, limit) {
+  const query = normalizeSearchText(queryInput);
+  if (!query) return [];
+  let rows = cachedTushareStockBasicRows();
+  if (!rows.length && TUSHARE_TOKEN) {
+    await refreshTushareStockBasicCacheIfNeeded({ force: true, background: false }).catch(() => null);
+    rows = cachedTushareStockBasicRows();
+  } else {
+    refreshTushareStockBasicCacheIfNeeded({ background: true });
+  }
+  if (!rows.length) return [];
+  return rows
+    .map((item) => ({ ...item, score: stockSearchScore(item, query) }))
+    .filter((item) => item.score < 999)
+    .sort((a, b) => a.score - b.score || a.symbol.localeCompare(b.symbol))
+    .slice(0, limit)
+    .map(({ score, searchName, searchSymbol, ...item }) => item);
+}
+
+function cachedTushareStockBasicRows() {
+  const rows = db.prepare(`
+    SELECT tsCode, symbol, name, market, area, industry, listDate, updatedAt
+    FROM tushare_stock_basic_cache
+    ORDER BY symbol ASC
+  `).all();
+  return rows.map((row) => ({
+    symbol: clean(row.symbol),
+    name: clean(row.name),
+    market: clean(row.market) || inferMarket(row.symbol),
+    quoteId: eastmoneySecidFromSymbol(row.symbol, row.market),
+    type: "A股",
+    area: clean(row.area),
+    industry: clean(row.industry),
+    listDate: dashDateKey(row.listDate) || clean(row.listDate),
+    searchName: normalizeSearchText(row.name),
+    searchSymbol: normalizeSearchText(row.symbol)
+  })).filter((item) => /^[0368]\d{5}$/.test(item.symbol) && item.name);
+}
+
+function tushareCacheUpdatedAt(tableName) {
+  const row = db.prepare(`SELECT MAX(updatedAt) AS updatedAt, COUNT(*) AS total FROM ${tableName}`).get();
+  return { updatedAt: row?.updatedAt || "", total: Number(row?.total || 0) };
+}
+
+async function refreshTushareStockBasicCacheIfNeeded(options = {}) {
+  if (!TUSHARE_TOKEN) {
+    recordTushareStatus("stock_basic", "not-configured", "未配置 TUSHARE_TOKEN", 0);
+    return { skipped: true, reason: "missing-token" };
+  }
+  const { updatedAt, total } = tushareCacheUpdatedAt("tushare_stock_basic_cache");
+  const age = updatedAt ? Date.now() - new Date(updatedAt).getTime() : Infinity;
+  const stale = !total || !Number.isFinite(age) || age > 24 * 60 * 60 * 1000;
+  if (!options.force && !stale) return { skipped: true, reason: "fresh-cache", total };
+  if (tushareStockBasicRefreshPromise) return options.background ? { pending: true } : tushareStockBasicRefreshPromise;
+  tushareStockBasicRefreshPromise = refreshTushareStockBasicCache()
+    .finally(() => { tushareStockBasicRefreshPromise = null; });
+  if (options.background) {
+    tushareStockBasicRefreshPromise.catch((error) => console.warn("tushare stock_basic background refresh failed:", readableError(error)));
+    return { pending: true };
+  }
+  return tushareStockBasicRefreshPromise;
+}
+
+async function refreshTushareStockBasicCache() {
+  const rows = await fetchTushareApiWithStatus(
+    "stock_basic",
+    { list_status: "L" },
+    "ts_code,symbol,name,area,industry,list_date",
+    "stock_basic"
+  );
+  const now = nowIso();
+  db.exec("BEGIN");
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO tushare_stock_basic_cache (tsCode, symbol, name, market, area, industry, listDate, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(tsCode) DO UPDATE SET
+        symbol = excluded.symbol,
+        name = excluded.name,
+        market = excluded.market,
+        area = excluded.area,
+        industry = excluded.industry,
+        listDate = excluded.listDate,
+        updatedAt = excluded.updatedAt
+    `);
+    let count = 0;
+    for (const row of rows) {
+      const tsCode = clean(row.ts_code).toUpperCase();
+      const symbol = clean(row.symbol).padStart(6, "0");
+      const market = tsCode.endsWith(".SH") ? "SH" : tsCode.endsWith(".SZ") ? "SZ" : inferMarket(symbol);
+      if (!/^[0368]\d{5}$/.test(symbol) || !["SH", "SZ"].includes(market)) continue;
+      stmt.run(tsCode, symbol, clean(row.name), market, clean(row.area), clean(row.industry), clean(row.list_date), now);
+      count += 1;
+    }
+    db.exec("COMMIT");
+    recordTushareStatus("stock_basic", "success", "", count);
+    return { total: count, updatedAt: now };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    recordTushareStatus("stock_basic", "failed", readableError(error), 0);
+    throw error;
+  }
 }
 
 async function loadAShareStockPool() {
@@ -4575,6 +4870,7 @@ async function fetchTushareApi(apiName, params = {}, fields = "") {
       fields
     }),
     timeout: 20000,
+    allowCurlFallback: true,
     headers: {
       "content-type": "application/json",
       referer: "https://tushare.pro/"
@@ -4591,6 +4887,21 @@ async function fetchTushareApi(apiName, params = {}, fields = "") {
   const items = Array.isArray(raw?.data?.items) ? raw.data.items : [];
   if (!items.length) throw new Error(`Tushare ${apiName} 无数据`);
   return items.map((values) => Object.fromEntries(fieldNames.map((field, index) => [field, values[index]])));
+}
+
+async function fetchTushareApiWithStatus(apiName, params = {}, fields = "", statusKey = apiName) {
+  if (!TUSHARE_TOKEN) {
+    recordTushareStatus(statusKey, "not-configured", "未配置 TUSHARE_TOKEN", 0);
+    throw new Error("未配置 TUSHARE_TOKEN");
+  }
+  try {
+    const rows = await fetchTushareApi(apiName, params, fields);
+    recordTushareStatus(statusKey, "success", "", rows.length);
+    return rows;
+  } catch (error) {
+    recordTushareStatus(statusKey, isTushareRateLimitError(error) ? "rate-limited" : "failed", readableError(error), 0);
+    throw error;
+  }
 }
 
 async function fetchTushareApiOptional(apiName, params = {}, fields = "") {
@@ -7208,6 +7519,29 @@ async function handleApi(req, res, url) {
     }
   }
 
+  if (url.pathname === "/api/admin/data-sources/tushare/status" && req.method === "GET") {
+    try {
+      requireAdmin(user);
+      const stockBasic = tushareCacheUpdatedAt("tushare_stock_basic_cache");
+      const tradeCalendar = tushareCacheUpdatedAt("tushare_trade_calendar_cache");
+      return json(res, 200, {
+        data: {
+          configured: Boolean(TUSHARE_TOKEN),
+          apiUrl: TUSHARE_API_URL,
+          caches: {
+            stockBasic,
+            tradeCalendar
+          },
+          statuses: getTushareStatusRows()
+        },
+        updatedAt: nowIso(),
+        stale: false
+      });
+    } catch (error) {
+      return json(res, 403, { message: readableError(error), errorMessage: readableError(error) });
+    }
+  }
+
   if (url.pathname === "/api/admin/users" && req.method === "POST") {
     try {
       requireAdmin(user);
@@ -8260,6 +8594,16 @@ function contentType(filePath) {
   return "application/octet-stream";
 }
 
+function primeTushareCaches() {
+  if (!TUSHARE_TOKEN) {
+    recordTushareStatus("stock_basic", "not-configured", "未配置 TUSHARE_TOKEN", 0);
+    recordTushareStatus("trade_cal", "not-configured", "未配置 TUSHARE_TOKEN", 0);
+    return;
+  }
+  refreshTushareStockBasicCacheIfNeeded({ background: true });
+  refreshTushareTradeCalendarIfNeeded({ background: true });
+}
+
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -8276,4 +8620,5 @@ server.listen(PORT, HOST, () => {
   scheduleDailyReportTimer();
   scheduleEtfHoldingRefreshTimer();
   scheduleNationalTeamRefreshTimer();
+  primeTushareCaches();
 });
