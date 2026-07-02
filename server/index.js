@@ -175,6 +175,12 @@ db.exec(`
     FOREIGN KEY(userId) REFERENCES users(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS api_response_cache (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS sector_catalog (
     code TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -610,6 +616,56 @@ async function cached(key, ttlMs, loader) {
   } catch (error) {
     const stale = staleCache.get(key);
     if (stale) return { ...stale, stale: true, errorMessage: readableError(error) };
+    return {
+      data: fallbackFor(key),
+      updatedAt: nowIso(),
+      stale: true,
+      errorMessage: readableError(error)
+    };
+  }
+}
+
+function readApiResponseCache(key) {
+  const row = db.prepare("SELECT value, updatedAt FROM api_response_cache WHERE key = ?").get(key);
+  if (!row?.value) return null;
+  try {
+    const parsed = JSON.parse(row.value);
+    if (!parsed || typeof parsed !== "object") return null;
+    return { value: parsed, updatedAt: row.updatedAt };
+  } catch {
+    return null;
+  }
+}
+
+function writeApiResponseCache(key, value) {
+  db.prepare(`
+    INSERT INTO api_response_cache (key, value, updatedAt)
+    VALUES (?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt
+  `).run(key, JSON.stringify(value), nowIso());
+}
+
+async function cachedPersistent(key, ttlMs, loader, options = {}) {
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.time < ttlMs) return { ...hit.value, stale: false };
+  const persisted = readApiResponseCache(key);
+  if (options.preferPersistent && persisted?.value?.data) {
+    const value = { ...persisted.value, stale: false, fromPersistentCache: true };
+    cache.set(key, { time: Date.now(), value });
+    staleCache.set(key, value);
+    return value;
+  }
+  try {
+    const data = await loader();
+    const value = { data, updatedAt: nowIso(), stale: false };
+    cache.set(key, { time: Date.now(), value });
+    staleCache.set(key, value);
+    writeApiResponseCache(key, value);
+    return value;
+  } catch (error) {
+    const stale = staleCache.get(key);
+    if (stale) return { ...stale, stale: true, errorMessage: readableError(error) };
+    if (persisted?.value?.data) return { ...persisted.value, stale: true, errorMessage: readableError(error) };
     return {
       data: fallbackFor(key),
       updatedAt: nowIso(),
@@ -2062,8 +2118,6 @@ function parseSectorDailyBar(code, line) {
 }
 
 async function loadSectorRankingDates() {
-  const cachedDates = cachedSectorRankingDates();
-  if (isOutsideAshareTradingSession() && cachedDates.length) return cachedDates;
   try {
     return await loadSignanaSectorRankingDates();
   } catch (error) {
@@ -2080,10 +2134,6 @@ async function loadSectorRankingDates() {
 }
 
 async function loadSectorRanking(dateInput = "latest") {
-  if (isOutsideAshareTradingSession()) {
-    const cachedRanking = await loadCachedSectorRanking(dateInput).catch(() => null);
-    if (cachedRanking?.rows?.length) return cachedRanking;
-  }
   const dates = await loadSectorRankingDates();
   const targetDate = normalizeSectorDate(dateInput, dates);
   const signanaRanking = await loadSignanaSectorRanking(targetDate).catch((error) => {
@@ -2106,38 +2156,6 @@ async function loadSectorRanking(dateInput = "latest") {
     date: targetDate,
     updated_at: chinaTimeLabel(),
     rows: validRows.sort((a, b) => (numberOrNull(b.pct_1d) ?? -Infinity) - (numberOrNull(a.pct_1d) ?? -Infinity))
-  };
-}
-
-function cachedSectorRankingDates(limit = 30) {
-  return db.prepare("SELECT DISTINCT tradeDate FROM sector_daily_bars ORDER BY tradeDate DESC LIMIT ?")
-    .all(limit)
-    .map((row) => clean(row.tradeDate))
-    .filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date));
-}
-
-async function loadCachedSectorRanking(dateInput = "latest") {
-  const dates = cachedSectorRankingDates();
-  if (!dates.length) throw new Error("暂无板块涨跌幅缓存");
-  const targetDate = normalizeSectorDate(dateInput, dates);
-  const catalog = await loadSectorCatalog().catch(() => []);
-  const catalogMap = new Map(catalog.map((row) => [clean(row.code).toUpperCase(), row]));
-  const codes = db.prepare("SELECT DISTINCT code FROM sector_daily_bars ORDER BY code").all()
-    .map((row) => clean(row.code).toUpperCase())
-    .filter((code) => /^BK\d{4}$/.test(code));
-  const rows = codes.map((code, index) => {
-    const bars = db.prepare("SELECT * FROM sector_daily_bars WHERE code = ? ORDER BY tradeDate").all(code);
-    const sector = catalogMap.get(code) || { code, name: code, category: "concept" };
-    return buildSectorRankingRow(sector, bars, targetDate, index);
-  }).filter(Boolean);
-  if (!rows.length) throw new Error("暂无可用板块涨跌幅缓存");
-  return {
-    date: targetDate,
-    updated_at: chinaTimeLabel(),
-    source: "缓存板块涨跌幅",
-    rows: rows
-      .sort((a, b) => (numberOrNull(b.pct_1d) ?? -Infinity) - (numberOrNull(a.pct_1d) ?? -Infinity))
-      .map((row, index) => ({ ...row, source_rank: index + 1 }))
   };
 }
 
@@ -2376,7 +2394,6 @@ function sectorSharpe(bars) {
 
 async function loadSectorFlowDates() {
   const cachedDates = db.prepare("SELECT DISTINCT tradeDate FROM sector_flow_minutes ORDER BY tradeDate DESC LIMIT 20").all().map((row) => row.tradeDate);
-  if (isOutsideAshareTradingSession() && cachedDates.length) return cachedDates;
   const latestFlowDate = await loadLatestSectorFlowDate().catch(() => "");
   const rankingDates = await loadSectorRankingDates().catch(() => []);
   return uniqueBy([latestFlowDate, rankingDates[0], ...cachedDates].filter(Boolean).map((date) => ({ date })), (row) => row.date)
@@ -2396,10 +2413,6 @@ async function loadLatestSectorFlowDate() {
 }
 
 async function loadSectorFlowSeries(dateInput = "latest") {
-  if (isOutsideAshareTradingSession()) {
-    const cachedSeries = await loadCachedSectorFlowSeries(dateInput).catch(() => null);
-    if (cachedSeries?.series?.length) return cachedSeries;
-  }
   const dates = await loadSectorFlowDates();
   const targetDate = normalizeSectorDate(dateInput, dates);
   const sectors = await loadSectorFlowRankingUniverse(targetDate);
@@ -2415,52 +2428,6 @@ async function loadSectorFlowSeries(dateInput = "latest") {
     title: "资金实时分时流向",
     session_minutes: 240,
     last_session_min: Math.min(239, lastSessionMin),
-    ticks: [
-      { value: 0, label: "9:30" },
-      { value: 60, label: "10:30" },
-      { value: 119, label: "11:30" },
-      { value: 180, label: "14:00" },
-      { value: 239, label: "15:00" }
-    ],
-    series
-  };
-}
-
-async function loadCachedSectorFlowSeries(dateInput = "latest") {
-  const dates = db.prepare("SELECT DISTINCT tradeDate FROM sector_flow_minutes ORDER BY tradeDate DESC LIMIT 20")
-    .all()
-    .map((row) => clean(row.tradeDate))
-    .filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date));
-  if (!dates.length) throw new Error("暂无板块资金流缓存");
-  const targetDate = normalizeSectorDate(dateInput, dates);
-  const catalog = await loadSectorCatalog().catch(() => []);
-  const catalogMap = new Map(catalog.map((row) => [clean(row.code).toUpperCase(), row]));
-  const rankingMap = new Map();
-  const ranking = await loadCachedSectorRanking(targetDate).catch(() => null);
-  for (const row of ranking?.rows || []) rankingMap.set(clean(row.code).toUpperCase(), row);
-  const codes = db.prepare("SELECT DISTINCT code FROM sector_flow_minutes WHERE tradeDate = ? ORDER BY code").all(targetDate)
-    .map((row) => clean(row.code).toUpperCase())
-    .filter((code) => /^BK\d{4}$/.test(code));
-  const rows = codes.map((code, index) => {
-    const minutes = db.prepare("SELECT * FROM sector_flow_minutes WHERE code = ? AND tradeDate = ? ORDER BY minuteIndex").all(code, targetDate);
-    const base = rankingMap.get(code) || catalogMap.get(code) || { code, name: code };
-    return buildSectorFlowSeries({
-      code,
-      name: clean(base.name || code),
-      source_rank: numberOrNull(base.source_rank) ?? index + 1,
-      featured: Number(base.featured || 0) > 0 || index < 10
-    }, minutes);
-  }).filter(Boolean);
-  const series = applySectorFlowColors(rows)
-    .sort((a, b) => (numberOrNull(a.source_rank) ?? Infinity) - (numberOrNull(b.source_rank) ?? Infinity));
-  if (!series.length) throw new Error("暂无可用板块资金流缓存");
-  const lastSessionMin = Math.max(0, ...series.flatMap((item) => item.data.map((value, index) => value == null ? -1 : index)));
-  return {
-    trade_date: targetDate,
-    title: "资金实时分时流向",
-    session_minutes: 240,
-    last_session_min: Math.min(239, lastSessionMin),
-    cached: true,
     ticks: [
       { value: 0, label: "9:30" },
       { value: 60, label: "10:30" },
@@ -7427,24 +7394,32 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/sectors/flow/dates" && req.method === "GET") {
     const ttl = isOutsideAshareTradingSession() ? 30 * 60_000 : 60_000;
-    return json(res, 200, await cached("sector-dates:flow", ttl, async () => ({ dates: await loadSectorFlowDates() })));
+    return json(res, 200, await cachedPersistent("sector-dates:flow", ttl, async () => ({ dates: await loadSectorFlowDates() }), {
+      preferPersistent: isOutsideAshareTradingSession()
+    }));
   }
 
   if (url.pathname === "/api/sectors/flow/series" && req.method === "GET") {
     const date = clean(url.searchParams.get("date") || "latest");
     const ttl = isOutsideAshareTradingSession() ? 10 * 60_000 : (date === "latest" ? 60_000 : 10 * 60_000);
-    return json(res, 200, await cached(`sector-flow:${date}`, ttl, () => loadSectorFlowSeries(date)));
+    return json(res, 200, await cachedPersistent(`sector-flow:${date}`, ttl, () => loadSectorFlowSeries(date), {
+      preferPersistent: isOutsideAshareTradingSession()
+    }));
   }
 
   if (url.pathname === "/api/sectors/ranking/dates" && req.method === "GET") {
     const ttl = isOutsideAshareTradingSession() ? 60 * 60_000 : 10 * 60_000;
-    return json(res, 200, await cached("sector-dates:ranking", ttl, async () => ({ dates: await loadSectorRankingDates() })));
+    return json(res, 200, await cachedPersistent("sector-dates:ranking", ttl, async () => ({ dates: await loadSectorRankingDates() }), {
+      preferPersistent: isOutsideAshareTradingSession()
+    }));
   }
 
   if (url.pathname === "/api/sectors/ranking" && req.method === "GET") {
     const date = clean(url.searchParams.get("date") || "latest");
     const ttl = isOutsideAshareTradingSession() ? 30 * 60_000 : (date === "latest" ? 10 * 60_000 : 60 * 60_000);
-    return json(res, 200, await cached(`sector-ranking:${date}`, ttl, () => loadSectorRanking(date)));
+    return json(res, 200, await cachedPersistent(`sector-ranking:${date}`, ttl, () => loadSectorRanking(date), {
+      preferPersistent: isOutsideAshareTradingSession()
+    }));
   }
 
   const sectorStocksMatch = url.pathname.match(/^\/api\/sectors\/([^/]+)\/stocks$/);
