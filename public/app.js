@@ -1298,6 +1298,7 @@ async function loadSectors(options = {}) {
 
 function warmSectorsAfterBoot() {
   if (!state.authed) return;
+  state.sectorOverviewLoadRequested = false;
   loadSectors({ silent: true, includeFlow: true }).catch(() => {});
 }
 
@@ -2312,7 +2313,7 @@ function render() {
   restorePageScroll();
   syncSectorFlowPickerHeight();
   restoreSectorFlowPickerScroll();
-  if (effectiveActiveTab() === "板块" && state.sectorMode === "overview") {
+  if (state.authed && !state.booting && !isBigScreenRoute() && state.sectorMode === "overview") {
     ensureSectorOverviewLoaded({ once: true });
   }
 }
