@@ -5242,12 +5242,12 @@ textarea {
 
 .admin-user-card {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(260px, 330px) minmax(240px, 340px);
-  gap: 8px;
+  grid-template-columns: minmax(260px, 1fr) minmax(440px, 520px) minmax(250px, 330px);
+  gap: 10px;
   align-items: center;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 10px;
+  padding: 8px 10px;
   background: #fbfdfe;
 }
 
@@ -5257,7 +5257,7 @@ textarea {
 }
 
 .admin-user-card.admin {
-  grid-template-columns: minmax(220px, 1fr) minmax(240px, 340px);
+  grid-template-columns: minmax(260px, 1fr) minmax(250px, 330px);
 }
 
 .system-guide {
@@ -5350,6 +5350,7 @@ textarea {
 
 .admin-user-card strong {
   font-size: 16px;
+  line-height: 1.2;
 }
 
 .admin-user-main {
@@ -5403,21 +5404,40 @@ textarea {
 
 .reset-password-form {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) 64px;
+  gap: 6px;
+  min-width: 0;
 }
 
 .account-expiry-form {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) minmax(82px, 0.55fr) minmax(86px, 0.45fr) auto;
-  gap: 8px;
-  align-items: center;
+  grid-template-columns: minmax(126px, 1fr) 78px 74px 66px;
+  gap: 6px;
+  align-items: end;
+  min-width: 0;
+}
+
+.account-expiry-form input,
+.reset-password-form input {
+  min-width: 0;
+  min-height: 36px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.account-expiry-form button,
+.reset-password-form button {
+  min-height: 36px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 14px;
 }
 
 .account-expiry-form input[type="checkbox"] {
-  width: 22px;
-  height: 22px;
-  min-height: 22px;
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
   margin: 0;
   accent-color: var(--accent);
 }
