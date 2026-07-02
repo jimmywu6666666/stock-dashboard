@@ -194,11 +194,26 @@ function emptyEnvelope(data) {
 }
 
 async function api(path, options = {}) {
-  const res = await fetch(path, {
-    credentials: "include",
-    headers: { "content-type": "application/json", ...(options.headers || {}) },
-    ...options
-  });
+  const { timeoutMs = 0, ...fetchOptions } = options;
+  let timeoutId = null;
+  if (timeoutMs > 0 && !fetchOptions.signal) {
+    const controller = new AbortController();
+    fetchOptions.signal = controller.signal;
+    timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  }
+  let res;
+  try {
+    res = await fetch(path, {
+      credentials: "include",
+      headers: { "content-type": "application/json", ...(fetchOptions.headers || {}) },
+      ...fetchOptions
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("请求超时");
+    throw error;
+  } finally {
+    if (timeoutId) window.clearTimeout(timeoutId);
+  }
   const body = await res.json().catch(() => ({}));
   if (res.status === 401) {
     state.authed = false;
@@ -364,7 +379,7 @@ async function loadEnvelope(key, path) {
 async function loadEnvelopeWithOptions(key, path, options = {}) {
   if (!options.silent) setLoading(key, true);
   try {
-    state[key] = await api(path);
+    state[key] = await api(path, options.timeoutMs ? { timeoutMs: options.timeoutMs } : {});
   } catch (error) {
     state[key] = { ...state[key], stale: true, errorMessage: `${error.message}：${path}` };
     if (options.retryOnce) {
@@ -1253,7 +1268,7 @@ async function loadSectorFlow(options = {}) {
   if (!state.sectorFlowPreference.data?.exists && !state.sectorFlowPreference.updatedAt) {
     await loadSectorFlowPreference({ silent: true });
   }
-  await loadEnvelopeWithOptions("sectorFlow", `/api/sectors/flow/series?date=${encodeURIComponent(date)}`, options);
+  await loadEnvelopeWithOptions("sectorFlow", `/api/sectors/flow/series?date=${encodeURIComponent(date)}`, { timeoutMs: 12000, ...options });
   seedSectorFlowSelection();
   const data = state.sectorFlow.data;
   if (data?.last_session_min != null && state.sectorFlowCursor == null) {
@@ -1263,7 +1278,7 @@ async function loadSectorFlow(options = {}) {
 
 async function loadSectorRanking(options = {}) {
   const date = state.sectorRankingDate || "latest";
-  await loadEnvelopeWithOptions("sectorRanking", `/api/sectors/ranking?date=${encodeURIComponent(date)}`, options);
+  await loadEnvelopeWithOptions("sectorRanking", `/api/sectors/ranking?date=${encodeURIComponent(date)}`, { timeoutMs: 15000, ...options });
 }
 
 async function loadSectorSummary(options = {}) {
@@ -5283,7 +5298,9 @@ function sectorOverviewTemplate() {
 }
 
 function sectorOverviewRanking(rows) {
-  if (!state.sectorRanking.data || (state.loading.has("sectorRanking") && !rows.length)) return `<div class="card-loading">加载中...</div>`;
+  if (state.loading.has("sectorRanking") && !rows.length) return `<div class="card-loading">加载中...</div>`;
+  if (!state.sectorRanking.data && state.sectorRanking.errorMessage) return emptyState(`数据加载失败：${state.sectorRanking.errorMessage}`);
+  if (!state.sectorRanking.data) return emptyState("板块涨跌幅后台同步中");
   if (!rows.length) return emptyState("暂无涨跌幅数据");
   const gainers = rows.slice(0, 3);
   const losers = rows.filter((row) => numberOrNull(row.pct_1d) != null).sort((a, b) => (numberOrNull(a.pct_1d) ?? Infinity) - (numberOrNull(b.pct_1d) ?? Infinity)).slice(0, 3);
@@ -5310,7 +5327,9 @@ function overviewRankRow(row, index, side) {
 }
 
 function sectorOverviewFlow(rows) {
-  if (!state.sectorFlow.data || (state.loading.has("sectorFlow") && !rows.length)) return `<div class="card-loading">加载中...</div>`;
+  if (state.loading.has("sectorFlow") && !rows.length) return `<div class="card-loading">加载中...</div>`;
+  if (!state.sectorFlow.data && state.sectorFlow.errorMessage) return emptyState(`数据加载失败：${state.sectorFlow.errorMessage}`);
+  if (!state.sectorFlow.data) return emptyState("进入资金流向后加载");
   if (!rows.length) return emptyState("暂无资金流数据");
   const legendRows = rows.slice(0, 6);
   return `
