@@ -1297,7 +1297,7 @@ async function loadSectors(options = {}) {
 
 function warmSectorsAfterBoot() {
   if (!state.authed) return;
-  loadSectors({ silent: true }).catch(() => {});
+  loadSectors({ silent: true, includeFlow: true }).catch(() => {});
 }
 
 async function loadEtfCategories(options = {}) {
@@ -5335,7 +5335,7 @@ function overviewRankRow(row, index, side) {
 function sectorOverviewFlow(rows) {
   if (state.loading.has("sectorFlow") && !rows.length) return `<div class="card-loading">加载中...</div>`;
   if (!state.sectorFlow.data && state.sectorFlow.errorMessage) return emptyState(`数据加载失败：${state.sectorFlow.errorMessage}`);
-  if (!state.sectorFlow.data) return emptyState("进入资金流向后加载");
+  if (!state.sectorFlow.data) return emptyState("板块资金流后台同步中");
   if (!rows.length) return emptyState("暂无资金流数据");
   const legendRows = rows.slice(0, 6);
   return `
