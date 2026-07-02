@@ -388,6 +388,7 @@ function ensureUserAccountColumns() {
   if (!columns.includes("expiresAt")) db.exec("ALTER TABLE users ADD COLUMN expiresAt TEXT;");
   if (!columns.includes("lastActiveAt")) db.exec("ALTER TABLE users ADD COLUMN lastActiveAt TEXT;");
   if (!columns.includes("dsaDailyLimit")) db.exec(`ALTER TABLE users ADD COLUMN dsaDailyLimit INTEGER NOT NULL DEFAULT ${DEFAULT_DSA_DAILY_LIMIT};`);
+  if (!columns.includes("isVip")) db.exec("ALTER TABLE users ADD COLUMN isVip INTEGER NOT NULL DEFAULT 0;");
   const defaultExpiry = daysFromNowIso(7);
   db.prepare("UPDATE users SET expiresAt = ? WHERE expiresAt IS NULL AND username <> ?")
     .run(defaultExpiry, cleanUsername(DEFAULT_USERNAME));
@@ -504,7 +505,7 @@ function currentUser(req) {
   try {
     const payload = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
     if (Number(payload.exp) <= Date.now() || !payload.uid) return null;
-    const user = db.prepare("SELECT id, username, displayName, expiresAt, lastActiveAt, dsaDailyLimit FROM users WHERE id = ?").get(payload.uid);
+    const user = db.prepare("SELECT id, username, displayName, expiresAt, lastActiveAt, dsaDailyLimit, isVip FROM users WHERE id = ?").get(payload.uid);
     if (isUserExpired(user)) return null;
     return user ? publicUser(user) : null;
   } catch {
@@ -513,15 +514,17 @@ function currentUser(req) {
 }
 
 function publicUser(user) {
+  const isAdmin = user.username === cleanUsername(DEFAULT_USERNAME);
   return {
     id: user.id,
     username: user.username,
     displayName: user.displayName || "",
     expiresAt: user.expiresAt || "",
     lastActiveAt: user.lastActiveAt || "",
-    dsaDailyLimit: user.username === cleanUsername(DEFAULT_USERNAME) ? null : normalizeDsaDailyLimit(user.dsaDailyLimit),
+    dsaDailyLimit: isAdmin ? null : normalizeDsaDailyLimit(user.dsaDailyLimit),
     expired: isUserExpired(user),
-    isAdmin: user.username === cleanUsername(DEFAULT_USERNAME)
+    isAdmin,
+    isVip: isAdmin || Boolean(user.isVip)
   };
 }
 
@@ -6312,12 +6315,13 @@ function holdingMetrics(item, quote = {}) {
 }
 
 function listAdminUsers() {
-  const users = db.prepare("SELECT id, username, displayName, expiresAt, lastActiveAt, dsaDailyLimit, createdAt, updatedAt FROM users ORDER BY id ASC").all();
+  const users = db.prepare("SELECT id, username, displayName, expiresAt, lastActiveAt, dsaDailyLimit, isVip, createdAt, updatedAt FROM users ORDER BY id ASC").all();
   return users.map((row) => ({
     id: row.id,
     username: row.username,
     displayName: row.displayName || "",
     isAdmin: row.username === cleanUsername(DEFAULT_USERNAME),
+    isVip: row.username === cleanUsername(DEFAULT_USERNAME) || Boolean(row.isVip),
     dsaDailyLimit: row.username === cleanUsername(DEFAULT_USERNAME) ? null : normalizeDsaDailyLimit(row.dsaDailyLimit),
     expiresAt: row.expiresAt || "",
     lastActiveAt: row.lastActiveAt || "",
@@ -6340,6 +6344,10 @@ function adminReportStatus(userId) {
 
 function requireAdmin(user) {
   if (!user?.isAdmin) throw new Error("需要管理员权限");
+}
+
+function requireVipFeature(user) {
+  if (!user?.isAdmin && !user?.isVip) throw new Error("需要VIP权限");
 }
 
 function targetUserIdForRequest(user, url, body = {}) {
@@ -6865,7 +6873,7 @@ async function handleApi(req, res, url) {
     if (!verifyPassword(body.password, user)) return json(res, 401, { ok: false, message: "用户名或密码不正确" });
     if (isUserExpired(user)) return json(res, 403, { ok: false, message: "账号已到期，请联系管理员" });
     updateUserActivity(user.id);
-    const activeUser = db.prepare("SELECT id, username, displayName, expiresAt, lastActiveAt, dsaDailyLimit FROM users WHERE id = ?").get(user.id);
+    const activeUser = db.prepare("SELECT id, username, displayName, expiresAt, lastActiveAt, dsaDailyLimit, isVip FROM users WHERE id = ?").get(user.id);
     return json(res, 200, { ok: true, user: publicUser(activeUser) }, {
       "set-cookie": `session=${createSessionCookie(user)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}`
     });
@@ -6885,7 +6893,7 @@ async function handleApi(req, res, url) {
     try {
       const result = db.prepare("INSERT INTO users (username, displayName, passwordHash, salt, expiresAt, lastActiveAt, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
         .run(username, displayName, password.hash, password.salt, expiresAt, nowIso(), nowIso(), nowIso());
-      const newUser = { id: Number(result.lastInsertRowid), username, displayName, expiresAt, lastActiveAt: nowIso(), dsaDailyLimit: DEFAULT_DSA_DAILY_LIMIT };
+      const newUser = { id: Number(result.lastInsertRowid), username, displayName, expiresAt, lastActiveAt: nowIso(), dsaDailyLimit: DEFAULT_DSA_DAILY_LIMIT, isVip: 0 };
       return json(res, 201, { ok: true, user: publicUser(newUser) }, {
         "set-cookie": `session=${createSessionCookie(newUser)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}`
       });
@@ -6955,14 +6963,16 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/national-team/overview" && req.method === "GET") {
     try {
+      requireVipFeature(user);
       return json(res, 200, { data: nationalTeamOverview(), updatedAt: nowIso(), stale: false });
     } catch (error) {
-      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+      return json(res, error.message === "需要VIP权限" ? 403 : 400, { message: readableError(error), errorMessage: readableError(error) });
     }
   }
 
   if (url.pathname === "/api/national-team/positions" && req.method === "GET") {
     try {
+      requireVipFeature(user);
       const params = {
         group: url.searchParams.get("group") || "",
         holder: url.searchParams.get("holder") || "",
@@ -6973,26 +6983,28 @@ async function handleApi(req, res, url) {
       const positions = ntFilteredPositions(params);
       return json(res, 200, { data: { rows: ntStockSummaryRows(positions), filters: nationalTeamOverview(), positionCount: positions.length }, updatedAt: nowIso(), stale: false });
     } catch (error) {
-      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+      return json(res, error.message === "需要VIP权限" ? 403 : 400, { message: readableError(error), errorMessage: readableError(error) });
     }
   }
 
   if (url.pathname === "/api/national-team/stocks/search" && req.method === "GET") {
     try {
+      requireVipFeature(user);
       const query = clean(url.searchParams.get("q") || url.searchParams.get("query") || "");
       const limit = clampLimit(url.searchParams.get("limit") || 8);
       const rows = query ? await searchStocks(query, limit).catch(() => []) : [];
       return json(res, 200, { data: rows, updatedAt: nowIso(), stale: false });
     } catch (error) {
-      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+      return json(res, error.message === "需要VIP权限" ? 403 : 400, { message: readableError(error), errorMessage: readableError(error) });
     }
   }
 
   if (url.pathname === "/api/national-team/stock" && req.method === "GET") {
     try {
+      requireVipFeature(user);
       return json(res, 200, { data: nationalTeamStock(url.searchParams.get("symbol") || ""), updatedAt: nowIso(), stale: false });
     } catch (error) {
-      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+      return json(res, error.message === "需要VIP权限" ? 403 : 400, { message: readableError(error), errorMessage: readableError(error) });
     }
   }
 
@@ -7010,64 +7022,64 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/etf-categories" && req.method === "GET") {
     try {
-      requireAdmin(user);
+      requireVipFeature(user);
       return json(res, 200, { data: etfCategoryTree(), updatedAt: nowIso(), stale: false });
     } catch (error) {
-      const status = error.message === "需要管理员权限" ? 403 : 500;
+      const status = error.message === "需要VIP权限" ? 403 : 500;
       return json(res, status, { data: { categories: [], total: 0 }, message: readableError(error), errorMessage: readableError(error), stale: true });
     }
   }
 
   if (url.pathname === "/api/etf-holdings/changes" && req.method === "GET") {
     try {
-      requireAdmin(user);
+      requireVipFeature(user);
       const primary = clean(url.searchParams.get("primary") || "");
       const secondary = clean(url.searchParams.get("secondary") || "");
       const period = Number(url.searchParams.get("period") || ETF_DEFAULT_PERIOD);
       return json(res, 200, { data: await etfHoldingChanges({ primary, secondary, period }), updatedAt: nowIso(), stale: false });
     } catch (error) {
-      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+      return json(res, error.message === "需要VIP权限" ? 403 : 400, { message: readableError(error), errorMessage: readableError(error) });
     }
   }
 
   if (url.pathname === "/api/etf-holdings/stock" && req.method === "GET") {
     try {
-      requireAdmin(user);
+      requireVipFeature(user);
       const stock = clean(url.searchParams.get("stock") || "");
       const period = Number(url.searchParams.get("period") || ETF_DEFAULT_PERIOD);
       return json(res, 200, { data: await etfStockHoldingLookup({ stock, period }), updatedAt: nowIso(), stale: false });
     } catch (error) {
-      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+      return json(res, error.message === "需要VIP权限" ? 403 : 400, { message: readableError(error), errorMessage: readableError(error) });
     }
   }
 
   if (url.pathname === "/api/etf-holdings/watchlist" && req.method === "GET") {
     try {
-      requireAdmin(user);
+      requireVipFeature(user);
       const targetUserId = targetUserIdForRequest(user, url);
       return json(res, 200, { data: await etfWatchlistHoldingLookup(targetUserId), userId: targetUserId, updatedAt: nowIso(), stale: false });
     } catch (error) {
-      return json(res, error.message === "需要管理员权限" ? 403 : 400, { message: readableError(error), errorMessage: readableError(error) });
+      return json(res, error.message === "需要VIP权限" || error.message === "需要管理员权限" ? 403 : 400, { message: readableError(error), errorMessage: readableError(error) });
     }
   }
 
   if (url.pathname === "/api/etf-holdings/stock-suggestions" && req.method === "GET") {
     try {
-      requireAdmin(user);
+      requireVipFeature(user);
       const query = clean(url.searchParams.get("query") || "");
       const limit = Number(url.searchParams.get("limit") || 10);
       return json(res, 200, { data: etfStockSuggestions(query, limit), updatedAt: nowIso(), stale: false });
     } catch (error) {
-      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+      return json(res, error.message === "需要VIP权限" ? 403 : 400, { message: readableError(error), errorMessage: readableError(error) });
     }
   }
 
   if (url.pathname === "/api/etf-holdings/daily-status" && req.method === "GET") {
     try {
-      requireAdmin(user);
+      requireVipFeature(user);
       return json(res, 200, { data: await etfDailyHoldingStatus(), updatedAt: nowIso(), stale: false });
     } catch (error) {
-      return json(res, 400, { message: readableError(error), errorMessage: readableError(error) });
+      return json(res, error.message === "需要VIP权限" ? 403 : 400, { message: readableError(error), errorMessage: readableError(error) });
     }
   }
 
@@ -7171,8 +7183,9 @@ async function handleApi(req, res, url) {
       const body = await readBody(req);
       const expiresAt = parseAccountExpiryDate(body.expiresAt);
       const dsaDailyLimit = parseDsaDailyLimit(body.dsaDailyLimit, target.dsaDailyLimit);
-      db.prepare("UPDATE users SET expiresAt = ?, dsaDailyLimit = ?, updatedAt = ? WHERE id = ?")
-        .run(expiresAt, dsaDailyLimit, nowIso(), adminUserMatch[1]);
+      const isVip = body.isVip === true || body.isVip === "on" || body.isVip === "true" || body.isVip === "1" ? 1 : 0;
+      db.prepare("UPDATE users SET expiresAt = ?, dsaDailyLimit = ?, isVip = ?, updatedAt = ? WHERE id = ?")
+        .run(expiresAt, dsaDailyLimit, isVip, nowIso(), adminUserMatch[1]);
       return json(res, 200, { data: await listAdminUsers() });
     } catch (error) {
       return json(res, 400, { message: readableError(error) });

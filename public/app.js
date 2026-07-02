@@ -117,7 +117,7 @@ const state = {
   message: ""
 };
 
-const baseTabs = ["行情", "AI分析", "资讯", "热度", "板块", "国家队", "自选股", "使用手册"];
+const baseTabs = ["行情", "AI分析", "资讯", "热度", "板块", "自选股", "使用手册"];
 const desktopOnlyTabs = new Set(["国家队", "ETF持仓变化"]);
 const bootTaskDefinitions = [
   ["market", "核心行情"],
@@ -137,8 +137,23 @@ const bootTaskDefinitions = [
 ];
 
 function visibleBootTaskDefinitions() {
-  if (state.user?.isAdmin) return bootTaskDefinitions;
-  return bootTaskDefinitions.filter(([key]) => key !== "adminUsers");
+  return bootTaskDefinitions.filter(([key]) => {
+    if (key === "adminUsers") return Boolean(state.user?.isAdmin);
+    if (key === "nationalTeam" || key === "etfCategories" || key === "etfDailyStatus") return hasVipFeature();
+    return true;
+  });
+}
+
+function hasVipFeature() {
+  return Boolean(state.user?.isAdmin || state.user?.isVip);
+}
+
+function dashboardTabs() {
+  const tabs = [...baseTabs];
+  if (hasVipFeature()) tabs.splice(tabs.indexOf("自选股"), 0, "国家队");
+  if (hasVipFeature()) tabs.push("ETF持仓变化");
+  if (state.user?.isAdmin) tabs.push("管理");
+  return tabs;
 }
 
 const app = document.querySelector("#app");
@@ -1270,6 +1285,7 @@ function warmSectorsAfterBoot() {
 }
 
 async function loadEtfCategories(options = {}) {
+  if (!hasVipFeature()) return;
   if (!options.silent) setLoading("etfCategories", true);
   try {
     state.etfCategories = await api("/api/etf-categories");
@@ -1300,7 +1316,7 @@ function seedEtfSelection() {
 }
 
 async function loadEtfDailyStatus(options = {}) {
-  if (!state.user?.isAdmin) return;
+  if (!hasVipFeature()) return;
   if (!options.silent) setLoading("etfDailyStatus", true);
   try {
     state.etfDailyStatus = await api("/api/etf-holdings/daily-status");
@@ -1313,6 +1329,7 @@ async function loadEtfDailyStatus(options = {}) {
 }
 
 async function loadEtfChanges(options = {}) {
+  if (!hasVipFeature()) return;
   if (!state.etfSelectedPrimary || !state.etfSelectedSecondary) return;
   if (!options.silent) setLoading("etfChanges", true);
   try {
@@ -1331,6 +1348,7 @@ async function loadEtfChanges(options = {}) {
 }
 
 async function loadEtfStockHoldings(options = {}) {
+  if (!hasVipFeature()) return;
   const query = String(state.etfStockSelected?.stockCode || state.etfStockQuery || "").trim();
   if (!query) {
     state.etfStockHoldings = emptyEnvelope(null);
@@ -1358,6 +1376,7 @@ async function loadEtfStockHoldings(options = {}) {
 }
 
 async function loadEtfWatchHoldings(options = {}) {
+  if (!hasVipFeature()) return;
   if (!options.silent) setLoading("etfWatchHoldings", true);
   try {
     state.etfWatchHoldings = await api(watchlistPath("/api/etf-holdings/watchlist"));
@@ -1370,11 +1389,13 @@ async function loadEtfWatchHoldings(options = {}) {
 }
 
 async function loadNationalTeam(options = {}) {
+  if (!hasVipFeature()) return;
   await loadNationalTeamOverview(options);
   if (state.ntHasQueried) await loadNationalTeamPositions(options);
 }
 
 async function loadNationalTeamOverview(options = {}) {
+  if (!hasVipFeature()) return;
   if (!options.silent) setLoading("nationalTeam", true);
   try {
     state.ntOverview = await api("/api/national-team/overview");
@@ -1387,6 +1408,7 @@ async function loadNationalTeamOverview(options = {}) {
 }
 
 async function loadNationalTeamPositions(options = {}) {
+  if (!hasVipFeature()) return;
   const params = new URLSearchParams();
   if (state.ntGroup) params.set("group", state.ntGroup);
   if (state.ntHolder) params.set("holder", state.ntHolder);
@@ -1436,6 +1458,7 @@ async function openNationalTeamStock(symbol) {
 }
 
 async function loadNationalTeamStock(symbol, options = {}) {
+  if (!hasVipFeature()) return;
   if (!options.silent) setLoading("ntStockDetail", true);
   try {
     state.ntStockDetail = await api(`/api/national-team/stock?symbol=${encodeURIComponent(symbol)}`);
@@ -1468,6 +1491,7 @@ function submitEtfStockQuery(event) {
 }
 
 async function loadEtfStockSuggestions(queryInput, options = {}) {
+  if (!hasVipFeature()) return;
   const query = String(queryInput || "").trim();
   if (query.length < 2) {
     state.etfStockSuggestions = { query, results: emptyEnvelope([]) };
@@ -1829,9 +1853,9 @@ async function refreshAll(options = {}) {
     loadEnvelope("mainlines", "/api/mainlines?limit=30"),
     loadEnvelope("hotStocks", "/api/hot-stocks?limit=10"),
     loadSectorSummary({ silent: true }),
-    loadNationalTeam({ silent: true }),
-    loadEtfCategories({ silent: true }),
-    loadEtfDailyStatus({ silent: true }),
+    hasVipFeature() ? loadNationalTeam({ silent: true }) : Promise.resolve(),
+    hasVipFeature() ? loadEtfCategories({ silent: true }) : Promise.resolve(),
+    hasVipFeature() ? loadEtfDailyStatus({ silent: true }) : Promise.resolve(),
     loadWatchlist(),
     loadReportSettings(),
     loadAdminUsers(),
@@ -1859,12 +1883,12 @@ async function refreshAllWithBootProgress(options = {}) {
       ]);
     }),
     runBootTask("sectorSummary", () => loadSectorSummary({ silent: true })),
-    runBootTask("nationalTeam", () => state.user?.isAdmin ? loadNationalTeam({ silent: true }) : Promise.resolve()),
-    runBootTask("etfCategories", () => loadEtfCategories({ silent: true })),
-    runBootTask("etfDailyStatus", () => loadEtfDailyStatus({ silent: true })),
+    hasVipFeature() ? runBootTask("nationalTeam", () => loadNationalTeam({ silent: true })) : Promise.resolve(),
+    hasVipFeature() ? runBootTask("etfCategories", () => loadEtfCategories({ silent: true })) : Promise.resolve(),
+    hasVipFeature() ? runBootTask("etfDailyStatus", () => loadEtfDailyStatus({ silent: true })) : Promise.resolve(),
     runBootTask("posts", () => state.selectedSymbol ? loadPosts(state.selectedSymbol) : Promise.resolve()),
     runBootTask("reportSettings", () => loadReportSettings()),
-    runBootTask("adminUsers", () => loadAdminUsers()),
+    state.user?.isAdmin ? runBootTask("adminUsers", () => loadAdminUsers()) : Promise.resolve(),
     runBootTask("dsaHistory", () => state.dsaConfig.data?.configured ? loadDsaHistory({ silent: true }) : Promise.resolve())
   ]);
 }
@@ -2282,6 +2306,8 @@ function isSmallScreenViewport() {
 }
 
 function effectiveActiveTab() {
+  const tabs = dashboardTabs();
+  if (!tabs.includes(state.activeTab)) return "行情";
   return isSmallScreenViewport() && desktopOnlyTabs.has(state.activeTab) ? "行情" : state.activeTab;
 }
 
@@ -2783,7 +2809,8 @@ function unlockBodyScroll(top = state.pageScrollTop || 0) {
 
 function switchTab(tab) {
   if (!tab || state.activeTab === tab) return;
-  if ((tab === "ETF持仓变化" || tab === "管理") && !state.user?.isAdmin) return;
+  if ((tab === "ETF持仓变化" || tab === "国家队") && !hasVipFeature()) return;
+  if (tab === "管理" && !state.user?.isAdmin) return;
   if (isSmallScreenViewport() && desktopOnlyTabs.has(tab)) return;
   if (state.activeTab === "板块") stopSectorReplay();
   state.activeTab = tab;
@@ -2862,7 +2889,7 @@ function registerTemplate() {
 }
 
 function dashboardTemplate() {
-  const tabs = state.user?.isAdmin ? [...baseTabs, "ETF持仓变化", "管理"] : baseTabs;
+  const tabs = dashboardTabs();
   const mobileTabs = tabs.filter((tab) => !desktopOnlyTabs.has(tab));
   const activeTab = effectiveActiveTab();
   return `
@@ -2943,12 +2970,14 @@ function dashboardTemplate() {
           ${sectorFeatureTemplate()}
         </section>
 
-        <section class="panel national-team-panel mobile-section ${mobileVisible("国家队")}">
-          ${sectionTitle("国家队持仓透视", state.ntOverview.data ? state.ntOverview : state.ntPositions, "nationalTeam")}
-          ${nationalTeamTemplate()}
-        </section>
+        ${hasVipFeature() ? `
+          <section class="panel national-team-panel mobile-section ${mobileVisible("国家队")}">
+            ${sectionTitle("国家队持仓透视", state.ntOverview.data ? state.ntOverview : state.ntPositions, "nationalTeam")}
+            ${nationalTeamTemplate()}
+          </section>
+        ` : ""}
 
-        ${state.user?.isAdmin ? `
+        ${hasVipFeature() ? `
           <section class="panel etf-holdings-panel mobile-section ${mobileVisible("ETF持仓变化")}">
             ${sectionTitle("ETF持仓变化", state.etfChanges.data ? state.etfChanges : state.etfCategories, "etfHoldings")}
             ${etfHoldingsTemplate()}
@@ -5783,6 +5812,7 @@ function adminUserItem(user) {
         <strong>${escapeHtml(user.displayName || user.username)}${user.isAdmin ? " · 管理员" : ""}</strong>
         <span class="expiry-badge ${user.expired ? "expired" : ""}">${accountExpiryText(user)}</span>
         ${user.isAdmin ? `<span class="quota-badge">AI 不限次数</span>` : `<span class="quota-badge">AI ${escapeHtml(user.dsaDailyLimit ?? 3)} 次/天</span>`}
+        ${user.isAdmin ? "" : `<span class="quota-badge ${user.isVip ? "" : "muted"}">VIP ${user.isVip ? "已开通" : "未开通"}</span>`}
         ${adminDailyReportBadge(user.dailyReport)}
         <span class="admin-user-meta">${escapeHtml(user.username)} · ID ${user.id} · 最后活跃 ${formatDateTime(user.lastActiveAt) || "暂无"}</span>
       </div>
@@ -5795,6 +5825,10 @@ function adminUserItem(user) {
           <label>
             <span>每日 AI</span>
             <input name="dsaDailyLimit" type="number" min="0" step="1" value="${escapeAttr(user.dsaDailyLimit ?? 3)}" aria-label="每日 AI 次数" required />
+          </label>
+          <label>
+            <span>VIP功能</span>
+            <input name="isVip" type="checkbox" ${user.isVip ? "checked" : ""} aria-label="VIP功能：国家队和ETF持仓变化" />
           </label>
           <button type="submit">保存</button>
         </form>
