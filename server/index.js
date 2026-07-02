@@ -3269,10 +3269,14 @@ async function generateWatchlistDailyReport(userOrId) {
   const enriched = (await mapWithConcurrency(items, includeEtfHoldings ? 3 : 8, async (item) => {
     const announcements = await cached(`announcements:${item.symbol}:8`, 300_000, () => loadStockAnnouncements(item.symbol, 8))
       .catch((error) => ({ data: [], stale: true, errorMessage: readableError(error) }));
-    const etfHoldings = includeEtfHoldings
-      ? await cached(`report-etf-holdings:${item.symbol}:30`, 21_600_000, () => etfStockHoldingLookup({ stock: item.symbol, period: 30 }))
-        .catch((error) => ({ errorMessage: readableError(error) }))
-      : null;
+    let etfHoldings = null;
+    if (includeEtfHoldings) {
+      const etfEnvelope = await cached(`report-etf-holdings:${item.symbol}:30`, 21_600_000, () => etfStockHoldingLookup({ stock: item.symbol, period: 30 }))
+        .catch((error) => ({ data: null, errorMessage: readableError(error) }));
+      etfHoldings = etfEnvelope?.data
+        ? { ...etfEnvelope.data, stale: Boolean(etfEnvelope.stale), errorMessage: etfEnvelope.errorMessage || "" }
+        : { errorMessage: etfEnvelope?.errorMessage || "ETF持仓数据暂不可用" };
+    }
     return {
       ...item,
       announcements: recentAnnouncementItems(announcements.data || []),
