@@ -379,7 +379,8 @@ async function loadEnvelope(key, path) {
 }
 
 async function loadEnvelopeWithOptions(key, path, options = {}) {
-  if (!options.silent) setLoading(key, true);
+  const shouldShowLoading = !options.silent || options.showLoading;
+  if (shouldShowLoading) setLoading(key, true);
   try {
     state[key] = await api(path, options.timeoutMs ? { timeoutMs: options.timeoutMs } : {});
   } catch (error) {
@@ -391,7 +392,8 @@ async function loadEnvelopeWithOptions(key, path, options = {}) {
       }, options.retryDelay || 1200);
     }
   } finally {
-    if (!options.silent) setLoading(key, false);
+    if (shouldShowLoading) setLoading(key, false);
+    else if (options.forceRender) render();
     else renderAfterAutoRefresh();
   }
 }
@@ -1299,7 +1301,7 @@ async function loadSectors(options = {}) {
 function warmSectorsAfterBoot() {
   if (!state.authed) return;
   state.sectorOverviewLoadRequested = false;
-  loadSectors({ silent: true, includeFlow: true }).catch(() => {});
+  loadSectors({ silent: true, includeFlow: true, showLoading: true, forceRender: true }).catch(() => {});
 }
 
 function ensureSectorOverviewLoaded(options = {}) {
@@ -1307,10 +1309,10 @@ function ensureSectorOverviewLoaded(options = {}) {
   if (options.once && state.sectorOverviewLoadRequested) return;
   if (options.once) state.sectorOverviewLoadRequested = true;
   if (!state.sectorRanking.data && !state.loading.has("sectorRanking") && !state.loading.has("sectorRankingDates")) {
-    loadSectorRankingOnly({ silent: true, ...options }).catch(() => {});
+    loadSectorRankingOnly({ ...options, silent: true, showLoading: true, forceRender: true }).catch(() => {});
   }
   if (!state.sectorFlow.data && !state.loading.has("sectorFlow") && !state.loading.has("sectorFlowDates")) {
-    ensureSectorFlowLoaded({ silent: true, ...options }).catch(() => {});
+    ensureSectorFlowLoaded({ ...options, silent: true, showLoading: true, forceRender: true }).catch(() => {});
   }
 }
 
@@ -2313,7 +2315,7 @@ function render() {
   restorePageScroll();
   syncSectorFlowPickerHeight();
   restoreSectorFlowPickerScroll();
-  if (state.authed && !state.booting && !isBigScreenRoute() && state.sectorMode === "overview") {
+  if (state.authed && !state.booting && state.sectorMode === "overview") {
     ensureSectorOverviewLoaded({ once: true });
   }
 }
