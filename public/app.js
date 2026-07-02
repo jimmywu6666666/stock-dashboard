@@ -32,6 +32,7 @@ const state = {
   sectorFlowPlaying: false,
   sectorFlowSpeed: 12,
   sectorFlowCursor: null,
+  sectorOverviewLoadRequested: false,
   sectorRankingDates: emptyEnvelope({ dates: [] }),
   sectorRanking: emptyEnvelope(null),
   sectorRankingDate: "latest",
@@ -1255,8 +1256,8 @@ function findStockForDetail(symbol) {
 
 async function loadSectorDates(options = {}) {
   await Promise.all([
-    loadEnvelopeWithOptions("sectorFlowDates", "/api/sectors/flow/dates", options),
-    loadEnvelopeWithOptions("sectorRankingDates", "/api/sectors/ranking/dates", options)
+    loadEnvelopeWithOptions("sectorFlowDates", "/api/sectors/flow/dates", { timeoutMs: 6000, ...options }),
+    loadEnvelopeWithOptions("sectorRankingDates", "/api/sectors/ranking/dates", { timeoutMs: 6000, ...options })
   ]);
   const flowDates = state.sectorFlowDates.data?.dates || [];
   const rankingDates = state.sectorRankingDates.data?.dates || [];
@@ -1298,6 +1299,18 @@ async function loadSectors(options = {}) {
 function warmSectorsAfterBoot() {
   if (!state.authed) return;
   loadSectors({ silent: true, includeFlow: true }).catch(() => {});
+}
+
+function ensureSectorOverviewLoaded(options = {}) {
+  if (!state.authed) return;
+  if (options.once && state.sectorOverviewLoadRequested) return;
+  if (options.once) state.sectorOverviewLoadRequested = true;
+  if (!state.sectorRanking.data && !state.loading.has("sectorRanking") && !state.loading.has("sectorRankingDates")) {
+    loadSectorRankingOnly({ silent: true, ...options }).catch(() => {});
+  }
+  if (!state.sectorFlow.data && !state.loading.has("sectorFlow") && !state.loading.has("sectorFlowDates")) {
+    ensureSectorFlowLoaded({ silent: true, ...options }).catch(() => {});
+  }
 }
 
 async function loadEtfCategories(options = {}) {
@@ -1687,7 +1700,7 @@ function toggleEtfStock(rowKey) {
 async function loadSectorFlowPreference(options = {}) {
   if (!options.silent) setLoading("sectorFlowPreference", true);
   try {
-    state.sectorFlowPreference = await api(preferencePath());
+    state.sectorFlowPreference = await api(preferencePath(), { timeoutMs: 5000 });
   } catch (error) {
     state.sectorFlowPreference = { ...state.sectorFlowPreference, stale: true, errorMessage: error.message };
   } finally {
@@ -1697,7 +1710,7 @@ async function loadSectorFlowPreference(options = {}) {
 }
 
 async function loadSectorRankingOnly(options = {}) {
-  await loadEnvelopeWithOptions("sectorRankingDates", "/api/sectors/ranking/dates", options);
+  await loadEnvelopeWithOptions("sectorRankingDates", "/api/sectors/ranking/dates", { timeoutMs: 6000, ...options });
   const rankingDates = state.sectorRankingDates.data?.dates || [];
   if (state.sectorRankingDate === "latest" && rankingDates[0]) state.sectorRankingDate = rankingDates[0];
   await loadSectorRanking(options);
@@ -1730,6 +1743,7 @@ function switchSectorMode(mode) {
   render();
   if (state.sectorMode === "flow") ensureSectorFlowLoaded();
   if (state.sectorMode === "ranking" && !state.sectorRanking.data && !state.loading.has("sectorRanking")) loadSectorRankingOnly();
+  if (state.sectorMode === "overview") ensureSectorOverviewLoaded();
 }
 
 function changeSectorFlowDate(value) {
@@ -2298,6 +2312,9 @@ function render() {
   restorePageScroll();
   syncSectorFlowPickerHeight();
   restoreSectorFlowPickerScroll();
+  if (effectiveActiveTab() === "板块" && state.sectorMode === "overview") {
+    ensureSectorOverviewLoaded({ once: true });
+  }
 }
 
 function appTemplate() {
@@ -2835,13 +2852,15 @@ function switchTab(tab) {
   if (isSmallScreenViewport() && desktopOnlyTabs.has(tab)) return;
   if (state.activeTab === "板块") stopSectorReplay();
   state.activeTab = tab;
+  if (tab === "板块") state.sectorOverviewLoadRequested = false;
   state.lockedPageScrollTop = 0;
   state.pageScrollTop = 0;
   state.watchPanelScrollTop = 0;
   state.lockedWatchPanelScrollTop = null;
   state.lastUserScrollAt = Date.now();
   render();
-  if (tab === "板块" && !state.sectorRanking.data && !state.loading.has("sectorRanking")) loadSectorRankingOnly();
+  if (tab === "板块" && state.sectorMode === "overview") ensureSectorOverviewLoaded();
+  if (tab === "板块" && state.sectorMode === "ranking" && !state.sectorRanking.data && !state.loading.has("sectorRanking")) loadSectorRankingOnly();
   if (tab === "板块" && state.sectorMode === "flow" && !state.sectorFlow.data && !state.loading.has("sectorFlow")) ensureSectorFlowLoaded();
   if (tab === "国家队" && !state.ntOverview.data && !state.loading.has("nationalTeam")) loadNationalTeam();
   if (tab === "ETF持仓变化") {
