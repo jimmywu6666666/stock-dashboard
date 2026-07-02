@@ -101,6 +101,7 @@ const state = {
   showWatchAdd: false,
   changePasswordOpen: false,
   installGuideOpen: false,
+  adminUsersExpanded: false,
   newAccountInfo: null,
   authMode: "login",
   allowSignup: false,
@@ -1994,6 +1995,7 @@ async function createAdminUser(event) {
     const result = await api("/api/admin/users", { method: "POST", body: JSON.stringify(data) });
     state.adminUsers = { data: result.data || [], updatedAt: new Date().toISOString(), stale: false };
     state.newAccountInfo = accountInfo;
+    state.adminUsersExpanded = true;
     state.message = `已创建用户 ${data.displayName || data.username}`;
     form.reset();
   } catch (error) {
@@ -2519,6 +2521,10 @@ function bindEvents() {
   document.querySelectorAll("[data-holding-form]").forEach((form) => form.addEventListener("submit", updateHolding));
   const adminCreateForm = document.querySelector("#admin-create-form");
   if (adminCreateForm) adminCreateForm.addEventListener("submit", createAdminUser);
+  document.querySelectorAll("[data-toggle-admin-users]").forEach((el) => el.addEventListener("click", () => {
+    state.adminUsersExpanded = !state.adminUsersExpanded;
+    render();
+  }));
   document.querySelectorAll("[data-reset-password]").forEach((form) => form.addEventListener("submit", resetAdminPassword));
   document.querySelectorAll("[data-account-expiry]").forEach((form) => form.addEventListener("submit", updateAccountExpiry));
   const changePasswordForm = document.querySelector("#change-password-form");
@@ -5771,9 +5777,15 @@ function adminPanelTemplate() {
       </label>
       <button type="submit">开设账号</button>
     </form>
-    <div class="admin-user-list">
-      ${users.map(adminUserItem).join("") || emptyState("暂无用户")}
-    </div>
+    <button type="button" class="admin-users-toggle" data-toggle-admin-users>
+      <span>${state.adminUsersExpanded ? "收起用户列表" : "展开用户列表"}</span>
+      <em>${escapeHtml(users.length)} 个账号</em>
+    </button>
+    ${state.adminUsersExpanded ? `
+      <div class="admin-user-list">
+        ${users.map(adminUserItem).join("") || emptyState("暂无用户")}
+      </div>
+    ` : ""}
   `;
 }
 
